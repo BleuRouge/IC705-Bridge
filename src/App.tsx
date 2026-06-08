@@ -1,0 +1,269 @@
+import { useEffect, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import type { CivResult, ConnState, LogEntry, StatusSnapshot } from "./types";
+import "./App.css";
+
+type Tab = "connection" | "terminal";
+
+const STATE_LABELS: Record<ConnState, string> = {
+  disconnected: "Déconnecté",
+  connecting: "Connexion…",
+  authenticated: "Authentifié",
+  civ_ready: "Tunnel CI-V prêt",
+  error: "Erreur",
+};
+
+function nowTs(): string {
+  return new Date().toLocaleTimeString("fr-FR", { hour12: false }) +
+    "." + String(new Date().getMilliseconds()).padStart(3, "0");
+}
+
+let logSeq = 0;
+
+function App() {
+  const [tab, setTab] = useState<Tab>("connection");
+  const [status, setStatus] = useState<StatusSnapshot>({
+    state: "disconnected",
+    message: "Déconnecté",
+    host: null,
+    api_running: false,
+    api_url: "http://127.0.0.1:8765",
+  });
+
+  // Champs de connexion
+  const [host, setHost] = useState("192.168.1.200");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  // Terminal CI-V
+  const [frame, setFrame] = useState("FE FE A4 E0 03 FD");
+  const [log, setLog] = useState<LogEntry[]>([]);
+  const logEndRef = useRef<HTMLDivElement>(null);
+
+  const connected = status.state === "civ_ready";
+
+  function addLog(dir: LogEntry["dir"], text: string) {
+    setLog((l) => [...l, { id: ++logSeq, ts: nowTs(), dir, text }]);
+  }
+
+  // Abonnements aux événements backend + état initial.
+  useEffect(() => {
+    invoke<StatusSnapshot>("get_status").then(setStatus).catch(() => {});
+
+    const unStatus = listen<StatusSnapshot>("status", (e) => setStatus(e.payload));
+    const unCiv = listen<string>("civ-rx", (e) => addLog("rx", e.payload));
+
+    return () => {
+      unStatus.then((f) => f());
+      unCiv.then((f) => f());
+    };
+  }, []);
+
+  useEffect(() => {
+    logEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [log]);
+
+  async function onConnect() {
+    setBusy(true);
+    try {
+      const s = await invoke<StatusSnapshot>("connect", { host, username, password });
+      setStatus(s);
+      addLog("info", `Connecté à ${host}`);
+      setTab("terminal");
+    } catch (err) {
+      addLog("error", String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onDisconnect() {
+    setBusy(true);
+    try {
+      const s = await invoke<StatusSnapshot>("disconnect");
+      setStatus(s);
+      addLog("info", "Déconnecté");
+    } catch (err) {
+      addLog("error", String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onSend() {
+    const f = frame.trim();
+    if (!f) return;
+    addLog("tx", f);
+    try {
+      // L'envoi déclenche les trames RX, affichées en temps réel via l'événement
+      // `civ-rx`. On ignore donc la réponse agrégée renvoyée ici (évite les doublons).
+      await invoke<CivResult>("send_civ", { frame: f });
+    } catch (err) {
+      addLog("error", String(err));
+    }
+  }
+
+  return (
+    <div className="app">
+      <header className="topbar">
+        <div className="brand">
+          <span className="logo">📻</span>
+          <div>
+            <div className="title">IC705 Bridge</div>
+            <div className="subtitle">Passerelle CI-V · Icom IC-705</div>
+          </div>
+        </div>
+        <StatePill state={status.state} />
+      </header>
+
+      <nav className="tabs">
+        <button className={tab === "connection" ? "tab active" : "tab"} onClick={() => setTab("connection")}>
+          Connection
+        </button>
+        <button
+          className={tab === "terminal" ? "tab active" : "tab"}
+          onClick={() => setTab("terminal")}
+          disabled={!connected}
+          title={connected ? "" : "Connecte-toi d'abord"}
+        >
+          CI-V Terminal
+        </button>
+      </nav>
+
+      <main className="content">
+        {tab === "connection" ? (
+          <ConnectionTab
+            host={host} setHost={setHost}
+            username={username} setUsername={setUsername}
+            password={password} setPassword={setPassword}
+            busy={busy} status={status}
+            onConnect={onConnect} onDisconnect={onDisconnect}
+          />
+        ) : (
+          <TerminalTab
+            frame={frame} setFrame={setFrame}
+            log={log} clear={() => setLog([])}
+            onSend={onSend} connected={connected}
+            logEndRef={logEndRef}
+          />
+        )}
+      </main>
+    </div>
+  );
+}
+
+function StatePill({ state }: { state: ConnState }) {
+  return <span className={`pill pill-${state}`}>{STATE_LABELS[state]}</span>;
+}
+
+function ConnectionTab(props: {
+  host: string; setHost: (v: string) => void;
+  username: string; setUsername: (v: string) => void;
+  password: string; setPassword: (v: string) => void;
+  busy: boolean; status: StatusSnapshot;
+  onConnect: () => void; onDisconnect: () => void;
+}) {
+  const { host, setHost, username, setUsername, password, setPassword, busy, status } = props;
+  const connected = status.state === "civ_ready";
+  const connecting = status.state === "connecting";
+
+  return (
+    <div className="panel">
+      <h2>Connexion à l'IC-705</h2>
+      <p className="hint">Renseigne l'IP et les identifiants RS-BA1 de la radio (réseau Wi-Fi).</p>
+
+      <form className="form" onSubmit={(e) => { e.preventDefault(); if (!connected) props.onConnect(); }}>
+        <label>
+          <span>Host / IP IC-705</span>
+          <input value={host} onChange={(e) => setHost(e.target.value)} placeholder="192.168.1.200" disabled={connected} />
+        </label>
+        <label>
+          <span>Username</span>
+          <input value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" disabled={connected} />
+        </label>
+        <label>
+          <span>Password</span>
+          <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" disabled={connected} />
+        </label>
+        <div className="ports">
+          <label><span>Control port</span><input value="50001" disabled /></label>
+          <label><span>CI-V port</span><input value="50002" disabled /></label>
+        </div>
+
+        <div className="actions">
+          {!connected ? (
+            <button type="submit" className="btn primary" disabled={busy || connecting}>
+              {connecting ? "Connexion…" : "Connect"}
+            </button>
+          ) : (
+            <button type="button" className="btn danger" onClick={props.onDisconnect} disabled={busy}>
+              Disconnect
+            </button>
+          )}
+        </div>
+      </form>
+
+      <div className="status-board">
+        <StatusLine ok={status.state !== "disconnected" && status.state !== "error" && status.state !== "connecting"} label="Network connected" />
+        <StatusLine ok={connected} label="Authenticated" />
+        <StatusLine ok={connected} label="CI-V tunnel ready" />
+        <StatusLine ok={status.api_running} label={`Local API running at ${status.api_url}`} />
+        {status.state === "error" && <div className="error-msg">⚠ {status.message}</div>}
+      </div>
+    </div>
+  );
+}
+
+function StatusLine({ ok, label }: { ok: boolean; label: string }) {
+  return (
+    <div className={ok ? "sline ok" : "sline"}>
+      <span className="mark">{ok ? "✓" : "○"}</span> {label}
+    </div>
+  );
+}
+
+function TerminalTab(props: {
+  frame: string; setFrame: (v: string) => void;
+  log: LogEntry[]; clear: () => void;
+  onSend: () => void; connected: boolean;
+  logEndRef: React.RefObject<HTMLDivElement | null>;
+}) {
+  const { frame, setFrame, log, connected } = props;
+  return (
+    <div className="panel terminal">
+      <h2>CI-V Terminal</h2>
+      <p className="hint">
+        Saisis une trame CI-V brute en hexadécimal, par ex. <code>FE FE A4 E0 03 FD</code>.
+      </p>
+
+      <div className="console">
+        {log.length === 0 && <div className="empty">Aucune trame pour le moment.</div>}
+        {log.map((e) => (
+          <div key={e.id} className={`line ${e.dir}`}>
+            <span className="time">{e.ts}</span>
+            <span className="tag">{e.dir.toUpperCase()}</span>
+            <span className="data">{e.text}</span>
+          </div>
+        ))}
+        <div ref={props.logEndRef} />
+      </div>
+
+      <form className="sendbar" onSubmit={(e) => { e.preventDefault(); props.onSend(); }}>
+        <input
+          value={frame}
+          onChange={(e) => setFrame(e.target.value)}
+          placeholder="FE FE A4 E0 03 FD"
+          spellCheck={false}
+          disabled={!connected}
+        />
+        <button type="submit" className="btn primary" disabled={!connected}>Send</button>
+        <button type="button" className="btn" onClick={props.clear}>Clear</button>
+      </form>
+      {!connected && <div className="warn">Connecte-toi à l'IC-705 dans l'onglet Connection.</div>}
+    </div>
+  );
+}
+
+export default App;

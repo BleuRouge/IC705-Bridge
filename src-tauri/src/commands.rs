@@ -1,0 +1,87 @@
+//! Commandes Tauri exposées au frontend (onglets Connection & CI-V Terminal).
+
+use std::sync::Arc;
+
+use serde::Serialize;
+use tauri::{AppHandle, State};
+
+use crate::error::{BridgeError, Result};
+use crate::session::{ConnState, Session};
+use crate::state::{AppState, StatusSnapshot};
+use crate::util::{parse_hex, to_hex};
+
+/// Résultat d'un envoi CI-V (écho TX + réponse RX en hex).
+#[derive(Debug, Serialize)]
+pub struct CivResult {
+    pub tx: String,
+    pub response: String,
+}
+
+/// Paramètres de connexion saisis dans l'onglet Connection.
+#[tauri::command]
+pub async fn connect(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    host: String,
+    username: String,
+    password: String,
+) -> Result<StatusSnapshot> {
+    let state = state.inner().clone();
+
+    // Une seule session à la fois : on ferme la précédente.
+    if let Some(old) = state.session.lock().await.take() {
+        old.disconnect().await;
+    }
+
+    state.set_status(Some(&app), ConnState::Connecting, format!("Connexion à {host}…"), Some(host.clone()));
+
+    match Session::connect(&host, &username, &password, Some(app.clone())).await {
+        Ok(session) => {
+            *state.session.lock().await = Some(session);
+            state.set_status(
+                Some(&app),
+                ConnState::CivReady,
+                "Tunnel CI-V prêt",
+                Some(host),
+            );
+            Ok(state.snapshot())
+        }
+        Err(e) => {
+            state.set_status(Some(&app), ConnState::Error, e.to_string(), Some(host));
+            Err(e)
+        }
+    }
+}
+
+/// Déconnecte la session active.
+#[tauri::command]
+pub async fn disconnect(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<StatusSnapshot> {
+    let state = state.inner().clone();
+    if let Some(session) = state.session.lock().await.take() {
+        session.disconnect().await;
+    }
+    state.set_status(Some(&app), ConnState::Disconnected, "Déconnecté", None);
+    Ok(state.snapshot())
+}
+
+/// Envoie une trame CI-V (saisie hexadécimale) et renvoie la réponse.
+#[tauri::command]
+pub async fn send_civ(state: State<'_, Arc<AppState>>, frame: String) -> Result<CivResult> {
+    let state = state.inner().clone();
+    let bytes = parse_hex(&frame)?;
+
+    let guard = state.session.lock().await;
+    let session = guard.as_ref().ok_or(BridgeError::NotConnected)?;
+    let response = session.send_civ(&bytes).await?;
+
+    Ok(CivResult {
+        tx: to_hex(&bytes),
+        response: to_hex(&response),
+    })
+}
+
+/// Renvoie l'état courant (pour rafraîchir l'UI).
+#[tauri::command]
+pub fn get_status(state: State<'_, Arc<AppState>>) -> StatusSnapshot {
+    state.snapshot()
+}
