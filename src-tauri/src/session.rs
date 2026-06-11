@@ -101,11 +101,7 @@ impl Session {
         let first_deadline = start + RESP_FIRST_TIMEOUT;
 
         // Attente de la première trame de réponse (hors écho).
-        loop {
-            let remaining = match first_deadline.checked_duration_since(Instant::now()) {
-                Some(d) => d,
-                None => break,
-            };
+        while let Some(remaining) = first_deadline.checked_duration_since(Instant::now()) {
             match tokio::time::timeout(remaining, rx.recv()).await {
                 Ok(Ok(received)) => {
                     if received == frame {

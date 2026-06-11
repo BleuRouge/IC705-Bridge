@@ -28,8 +28,14 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_process::init())
         .manage(app_state.clone())
-        .setup(move |_app| {
+        .setup(move |app| {
+            // Mises à jour automatiques (desktop uniquement).
+            #[cfg(desktop)]
+            app.handle()
+                .plugin(tauri_plugin_updater::Builder::new().build())?;
+
             // Démarrage de l'API HTTP locale (toujours active).
             let st = app_state.clone();
             tauri::async_runtime::spawn(async move {

@@ -122,6 +122,20 @@ h2 { margin: 0 0 4px; font-size: 18px; }
 .btn:disabled { opacity: .5; cursor: not-allowed; }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 .btn.danger { background: var(--danger); border-color: var(--danger); color: #fff; }
+.btn.small { padding: 6px 14px; font-size: 13px; }
+
+.update-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 20px;
+  background: rgba(47, 129, 247, .12);
+  border-bottom: 1px solid var(--accent);
+  color: var(--text);
+  font-size: 14px;
+}
+.update-actions { display: flex; gap: 8px; }
 
 /* Status board */
 .status-board {

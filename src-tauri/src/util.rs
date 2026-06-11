@@ -21,7 +21,7 @@ pub fn parse_hex(input: &str) -> Result<Vec<u8>> {
     if cleaned.is_empty() {
         return Err(BridgeError::InvalidFrame("trame vide".into()));
     }
-    if cleaned.len() % 2 != 0 {
+    if !cleaned.len().is_multiple_of(2) {
         return Err(BridgeError::InvalidFrame(format!(
             "nombre impair de chiffres hexadécimaux ({})",
             cleaned.len()

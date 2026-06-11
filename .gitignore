@@ -21,6 +21,9 @@ __pycache__/
 .venv/
 venv/
 
+# Tauri updater signing keys — NEVER commit the private key
+.tauri/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

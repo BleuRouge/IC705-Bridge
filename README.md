@@ -48,6 +48,24 @@ Le cœur RS-BA1 est porté depuis [kappanhang](https://github.com/nonoo/kappanha
 
 ---
 
+## Téléchargement & installation
+
+Les installeurs macOS / Windows / Linux sont publiés sur la page
+[**Releases**](https://github.com/BleuRouge/IC705-Bridge/releases). Téléchargez
+celui de votre système :
+
+- **macOS** : `.dmg` (universel Intel + Apple Silicon)
+- **Windows** : `.exe` (NSIS) ou `.msi`
+- **Linux** : `.AppImage` ou `.deb`
+
+Les binaires ne sont pas signés (déploiement pédagogique/intranet) : au premier
+lancement, contournez l'avertissement une fois (macOS : clic droit → **Ouvrir** ;
+Windows : SmartScreen → **Informations complémentaires** → **Exécuter quand
+même**). Les **mises à jour suivantes sont automatiques** (l'app les propose au
+démarrage). Détails et procédure de publication : [docs/RELEASING.md](docs/RELEASING.md).
+
+---
+
 ## Développement
 
 Pré-requis : [Rust](https://rustup.rs/), [Node.js](https://nodejs.org/) + `pnpm`,
@@ -83,6 +101,11 @@ pnpm build                     # type-check + build frontend
 |---------|-----------|-------------------------------|-------------------------------|
 | `GET`   | `/status` | —                             | état de la connexion          |
 | `POST`  | `/civ`    | `{"frame": "FE FE A4 E0 03 FD"}` | `{"tx": "...", "response": "..."}` |
+| `GET`   | `/stream` | —                             | flux SSE des trames CI-V reçues (une trame hex/événement) |
+
+Un moniteur d'exemple ([`python/monitor.py`](python/monitor.py)) consomme
+`/stream` pour afficher un **waterfall** du scope + les paramètres de la radio
+(`pip install matplotlib numpy`).
 
 ### Librairie Python
 
