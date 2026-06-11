@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
+from typing import Iterator
 
 __all__ = ["IC705Bridge", "BridgeError"]
 
@@ -66,7 +67,39 @@ class IC705Bridge:
         except BridgeError:
             return False
 
-    # -- stream_civ() : à venir ---------------------------------------------
+    # -- stream_civ() : flux temps réel des trames reçues -------------------
+
+    def stream_civ(self) -> Iterator[str]:
+        """Itère sur les trames CI-V reçues de la radio (flux SSE `/stream`).
+
+        Chaque élément est une trame hex (ex. ``"FE FE E0 A4 03 ... FD"``).
+        Idéal pour le monitoring / waterfall : toutes les trames reçues passent
+        ici, y compris les réponses aux commandes et les données scope ``27 00``.
+
+        Le générateur bloque tant que la connexion est ouverte. Il lève
+        :class:`BridgeError` si l'app n'est pas joignable ou pas connectée à la
+        radio (HTTP 503) ; relancer alors l'itération après un court délai.
+        """
+        req = urllib.request.Request(
+            self.url + "/stream", headers={"Accept": "text/event-stream"}
+        )
+        try:
+            # timeout=None : on bloque (le keep-alive SSE maintient le flux ouvert).
+            resp = urllib.request.urlopen(req, timeout=None)
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", "replace")
+            raise BridgeError(f"{e.code} {e.reason}: {detail}") from e
+        except urllib.error.URLError as e:
+            raise BridgeError(
+                f"IC705 Bridge injoignable sur {self.url} "
+                f"(l'application est-elle lancée ?) : {e.reason}"
+            ) from e
+
+        with resp:
+            for raw in resp:
+                line = raw.decode("utf-8", "replace").rstrip("\r\n")
+                if line.startswith("data:"):
+                    yield line[5:].strip()
 
     # -- Transport HTTP ------------------------------------------------------
 

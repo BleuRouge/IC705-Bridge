@@ -15,6 +15,12 @@ dist-ssr
 # Reference implementations (kappanhang, wfview) — read-only, not part of this project
 reference/
 
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

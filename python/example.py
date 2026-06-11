@@ -20,7 +20,6 @@ rep = rig.send_civ("FE FE A4 E0 03 FD")
 print("TX:", rep["tx"])
 print("RX:", rep["response"])
 
-# Autres exemples (à adapter selon le TP)
 for frame in [
     "FE FE A4 E0 04 FD",  # lecture du mode
     "FE FE A4 E0 15 02 FD",  # lecture du S-mètre

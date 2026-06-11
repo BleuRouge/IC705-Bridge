@@ -5,10 +5,10 @@
 //! et ses boucles de keepalive (pkt0 idle + pkt7 ping) avec gestion de la
 //! retransmission demandée par la radio.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use tokio::net::UdpSocket;
@@ -30,12 +30,62 @@ const PKT0_IDLE_INTERVAL: Duration = Duration::from_secs(1);
 const PKT0_IDLE_AFTER: Duration = Duration::from_secs(1);
 /// Taille max du buffer de retransmission (≈ 300 ms d'historique).
 const TX_BUF_MAX: usize = 256;
+/// Période d'envoi groupé des demandes de retransmission RX (façon wfview).
+const RX_RETRANSMIT_INTERVAL: Duration = Duration::from_millis(100);
+/// Nombre max de demandes de retransmission par seq manquant.
+const RX_MAX_ATTEMPTS: u8 = 4;
+/// Au-delà de ce nombre de seq manquants, on abandonne tout (flush).
+const RX_MISSING_FLUSH: usize = 50;
 
 /// État du sous-protocole pkt0 (idle keepalive + retransmission).
 struct Pkt0State {
     send_seq: u16,
     tx_buf: VecDeque<(u16, Vec<u8>)>,
     last_tracked_at: Instant,
+    last_send_at: Instant,
+}
+
+/// Suivi des seq reçus (type 0x00) : dédoublonnage + détection des trous.
+struct RxState {
+    last_seq: Option<u16>,
+    /// seq manquants → nombre de demandes de retransmission déjà émises.
+    missing: HashMap<u16, u8>,
+}
+
+impl RxState {
+    /// Enregistre un seq reçu. Renvoie `true` si le paquet doit être livré,
+    /// `false` si c'est un duplicata (retransmission déjà vue).
+    fn on_seq(&mut self, seq: u16) -> bool {
+        let Some(last) = self.last_seq else {
+            self.last_seq = Some(seq);
+            return true;
+        };
+        let diff = seq.wrapping_sub(last);
+        if diff == 0 {
+            return false; // duplicata du dernier paquet livré
+        }
+        if diff < 0x8000 {
+            // Paquet "en avant" : les seq intermédiaires sont manquants.
+            if diff > 1 {
+                if (diff - 1) as usize > RX_MISSING_FLUSH {
+                    // Trou trop grand : on resynchronise sans rien réclamer.
+                    self.missing.clear();
+                } else {
+                    for k in 1..diff {
+                        self.missing.entry(last.wrapping_add(k)).or_insert(0);
+                    }
+                    if self.missing.len() > RX_MISSING_FLUSH {
+                        self.missing.clear();
+                    }
+                }
+            }
+            self.last_seq = Some(seq);
+            true
+        } else {
+            // Paquet "en arrière" : retransmission attendue, ou duplicata.
+            self.missing.remove(&seq).is_some()
+        }
+    }
 }
 
 /// État du sous-protocole pkt7 (ping/keepalive).
@@ -53,6 +103,7 @@ pub struct StreamCommon {
     got_remote_sid: AtomicBool,
     pkt0: Mutex<Pkt0State>,
     pkt7: Mutex<Pkt7State>,
+    rx: StdMutex<RxState>,
 }
 
 impl StreamCommon {
@@ -82,10 +133,15 @@ impl StreamCommon {
                 send_seq: 1,
                 tx_buf: VecDeque::new(),
                 last_tracked_at: Instant::now(),
+                last_send_at: Instant::now(),
             }),
             pkt7: Mutex::new(Pkt7State {
                 send_seq: 0,
                 inner_seq: 0x8304,
+            }),
+            rx: StdMutex::new(RxState {
+                last_seq: None,
+                missing: HashMap::new(),
             }),
         }))
     }
@@ -134,6 +190,9 @@ impl StreamCommon {
             st.tx_buf.pop_front();
         }
         st.send_seq = st.send_seq.wrapping_add(1);
+        // Réarme le timer idle après CHAQUE envoi suivi (§6.1 / §12-C) ; les
+        // envois non-idle maintiennent en plus la cadence "active" (100 ms).
+        st.last_send_at = Instant::now();
         let is_idle = packet.len() == 16 && packet[4] == 0x00;
         if !is_idle {
             st.last_tracked_at = Instant::now();
@@ -202,13 +261,14 @@ impl StreamCommon {
 
     /// Attend (en lecture directe sur le socket) un paquet précis. À n'utiliser
     /// qu'AVANT le démarrage du reader (sinon les paquets sont consommés ailleurs).
-    pub async fn expect(&self, timeout: Duration, len: usize, prefix: &[u8]) -> Option<Vec<u8>> {
-        self.recv_matching(timeout, len, prefix).await
+    pub async fn expect(&self, timeout: Duration, min_len: usize, prefix: &[u8]) -> Option<Vec<u8>> {
+        self.recv_matching(timeout, min_len, prefix).await
     }
 
-    /// Reçoit en boucle jusqu'à trouver un paquet de longueur `len` commençant par
-    /// `prefix`, ou `None` après `timeout`. À n'utiliser qu'avant le démarrage du reader.
-    async fn recv_matching(&self, timeout: Duration, len: usize, prefix: &[u8]) -> Option<Vec<u8>> {
+    /// Reçoit en boucle jusqu'à trouver un paquet d'au moins `min_len` octets
+    /// commençant par `prefix`, ou `None` après `timeout`. À n'utiliser qu'avant
+    /// le démarrage du reader.
+    async fn recv_matching(&self, timeout: Duration, min_len: usize, prefix: &[u8]) -> Option<Vec<u8>> {
         let deadline = Instant::now() + timeout;
         let mut buf = [0u8; 1500];
         loop {
@@ -216,7 +276,7 @@ impl StreamCommon {
             match tokio::time::timeout(remaining, self.socket.recv(&mut buf)).await {
                 Ok(Ok(n)) => {
                     let r = &buf[..n];
-                    if r.len() == len && r.len() >= prefix.len() && &r[..prefix.len()] == prefix {
+                    if r.len() >= min_len && r.len() >= prefix.len() && &r[..prefix.len()] == prefix {
                         return Some(r.to_vec());
                     }
                     // Sinon : paquet non attendu (ping, etc.) -> on continue.
@@ -320,6 +380,12 @@ impl StreamCommon {
         Ok(())
     }
 
+    /// Suivi RX (§6.3) : enregistre le seq d'un paquet type 0x00 reçu.
+    /// Renvoie `true` si le paquet doit être livré, `false` si duplicata.
+    fn on_rx_seq(&self, seq: u16) -> bool {
+        self.rx.lock().unwrap().on_seq(seq)
+    }
+
     /// Envoi du paquet de déconnexion (`type 0x05`, ×2).
     pub async fn send_disconnect(&self) -> Result<()> {
         let p = self.header(16, 0x05, 0).to_vec();
@@ -341,7 +407,7 @@ fn compute_local_sid(addr: SocketAddr) -> u32 {
 }
 
 /// Démarre la boucle de lecture : gère pkt7 et les retransmissions en interne,
-/// et transmet tous les autres paquets (idle + data) sur `data_tx`.
+/// déduplique les paquets type 0x00 et transmet le reste (idle + data) sur `data_tx`.
 pub fn spawn_reader(common: Arc<StreamCommon>, data_tx: mpsc::UnboundedSender<Vec<u8>>) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut buf = [0u8; 1500];
@@ -359,8 +425,49 @@ pub fn spawn_reader(common: Arc<StreamCommon>, data_tx: mpsc::UnboundedSender<Ve
                 let _ = common.handle_pkt0_retransmit(&r).await;
                 continue;
             }
+            // Suivi des paquets "tracked" de la radio (type 0x00, seq != 0) :
+            // écarte les duplicatas, note les trous pour retransmission.
+            if r.len() >= 16 && r[4] == 0x00 && r[5] == 0x00 {
+                let seq = u16::from_le_bytes([r[6], r[7]]);
+                if seq != 0 && !common.on_rx_seq(seq) {
+                    continue;
+                }
+            }
             if data_tx.send(r).is_err() {
                 break;
+            }
+        }
+    })
+}
+
+/// Démarre la boucle de demandes de retransmission RX groupées (§6.3, façon
+/// wfview) : toutes les 100 ms, réclame les seq manquants, max 4 essais chacun.
+pub fn spawn_rx_retransmit(common: Arc<StreamCommon>) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(RX_RETRANSMIT_INTERVAL);
+        ticker.tick().await; // consomme le tick immédiat
+        loop {
+            ticker.tick().await;
+            let due: Vec<u16> = {
+                let mut st = common.rx.lock().unwrap();
+                let mut due = Vec::new();
+                st.missing.retain(|&seq, attempts| {
+                    *attempts += 1;
+                    if *attempts > RX_MAX_ATTEMPTS {
+                        false // on abandonne ce seq
+                    } else {
+                        due.push(seq);
+                        true
+                    }
+                });
+                due
+            };
+            for seq in due {
+                // Demande simple : `10 00 00 00 01 00 [seq LE] [SIDs]`.
+                let p = common.header(16, 0x01, seq).to_vec();
+                if common.send_raw(&p).await.is_err() {
+                    return;
+                }
             }
         }
     })
@@ -384,22 +491,77 @@ pub fn spawn_pkt7(common: Arc<StreamCommon>, first_seq: u16) -> JoinHandle<()> {
     })
 }
 
-/// Démarre l'émission périodique des idle pkt0 (cadence rapide après activité).
+/// Démarre l'émission périodique des idle pkt0. Le timer est réarmé par chaque
+/// paquet suivi (§6.1) : un idle ne part que si rien n'a été émis depuis
+/// l'intervalle courant (100 ms en activité, 1 s au repos).
 pub fn spawn_pkt0_idle(common: Arc<StreamCommon>) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
-            let interval = {
+            let (last_send, active) = {
                 let st = common.pkt0.lock().await;
-                if st.last_tracked_at.elapsed() >= PKT0_IDLE_AFTER {
-                    PKT0_IDLE_INTERVAL
-                } else {
-                    PKT0_ACTIVE_INTERVAL
-                }
+                (st.last_send_at, st.last_tracked_at.elapsed() < PKT0_IDLE_AFTER)
             };
-            tokio::time::sleep(interval).await;
-            if common.send_idle(true, 0).await.is_err() {
-                break;
+            let interval = if active { PKT0_ACTIVE_INTERVAL } else { PKT0_IDLE_INTERVAL };
+            let due = last_send + interval;
+            let now = Instant::now();
+            if now >= due {
+                if common.send_idle(true, 0).await.is_err() {
+                    break;
+                }
+            } else {
+                tokio::time::sleep(due - now).await;
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fresh() -> RxState {
+        RxState { last_seq: None, missing: HashMap::new() }
+    }
+
+    #[test]
+    fn rx_delivers_in_order_and_drops_duplicates() {
+        let mut rx = fresh();
+        assert!(rx.on_seq(10));
+        assert!(rx.on_seq(11));
+        assert!(!rx.on_seq(11)); // duplicata du dernier
+        assert!(rx.on_seq(12));
+        assert!(rx.missing.is_empty());
+    }
+
+    #[test]
+    fn rx_tracks_gaps_and_accepts_retransmission_once() {
+        let mut rx = fresh();
+        assert!(rx.on_seq(10));
+        assert!(rx.on_seq(13)); // trou : 11 et 12 manquants
+        assert_eq!(rx.missing.len(), 2);
+        assert!(rx.missing.contains_key(&11));
+        assert!(rx.missing.contains_key(&12));
+        assert!(rx.on_seq(11)); // retransmission attendue -> livrée
+        assert!(!rx.on_seq(11)); // re-duplicata -> écarté
+        assert_eq!(rx.missing.len(), 1);
+    }
+
+    #[test]
+    fn rx_flushes_on_huge_gap() {
+        let mut rx = fresh();
+        assert!(rx.on_seq(10));
+        assert!(rx.on_seq(11));
+        assert!(rx.on_seq(1000)); // trou > flush : resynchronisation
+        assert!(rx.missing.is_empty());
+        assert_eq!(rx.last_seq, Some(1000));
+    }
+
+    #[test]
+    fn rx_handles_u16_wraparound() {
+        let mut rx = fresh();
+        assert!(rx.on_seq(0xFFFE));
+        assert!(rx.on_seq(0x0001)); // wrap : 0xFFFF et 0x0000 manquants
+        assert!(rx.missing.contains_key(&0xFFFF));
+        assert!(rx.missing.contains_key(&0x0000));
+    }
 }

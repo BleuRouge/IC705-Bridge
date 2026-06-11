@@ -11,7 +11,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use super::passcode::passcode;
-use super::stream::{spawn_pkt0_idle, spawn_pkt7, spawn_reader, StreamCommon};
+use super::stream::{spawn_pkt0_idle, spawn_pkt7, spawn_reader, spawn_rx_retransmit, StreamCommon};
 use crate::error::{BridgeError, Result};
 
 pub const CONTROL_PORT: u16 = 50001;
@@ -122,9 +122,10 @@ pub async fn connect_control(host: &str, username: &str, password: &str) -> Resu
     });
 
     // Login (avant le démarrage du reader : réponse lue en direct).
+    // Réponse 0x60, len >= 96 ; le seq (bytes 6-7) dépend de la radio, on ne le contraint pas.
     ctrl.send_login().await?;
     let r = common
-        .expect(Duration::from_secs(2), 96, &[0x60, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00])
+        .expect(Duration::from_secs(2), 96, &[0x60, 0x00, 0x00, 0x00, 0x00, 0x00])
         .await
         .ok_or_else(|| BridgeError::Timeout("réponse de login".into()))?;
     if r[48..52] == [0xff, 0xff, 0xff, 0xfe] {
@@ -139,6 +140,7 @@ pub async fn connect_control(host: &str, username: &str, password: &str) -> Resu
         spawn_reader(common.clone(), data_tx),
         spawn_pkt7(common.clone(), 2),
         spawn_pkt0_idle(common.clone()),
+        spawn_rx_retransmit(common.clone()),
         spawn_control_owner(ctrl.clone(), data_rx, ready_tx),
     ];
 
@@ -171,7 +173,8 @@ fn spawn_control_owner(
 
         while let Some(r) = data_rx.recv().await {
             match r.len() {
-                168 if r[..6] == [0xa8, 0x00, 0x00, 0x00, 0x00, 0x00] => {
+                // Capabilities 0xa8 : len >= 168 selon la radio (spec §7, étape 4).
+                len if len >= 168 && r[..6] == [0xa8, 0x00, 0x00, 0x00, 0x00, 0x00] => {
                     let mut id = [0u8; 16];
                     id.copy_from_slice(&r[66..82]);
                     a8 = Some(id);

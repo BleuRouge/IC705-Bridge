@@ -45,6 +45,14 @@ mod tests {
     }
 
     #[test]
+    fn matches_spec_test_vector() {
+        // Spec §9, validé sur radio : passcode("beer") = 2B 3F 55 5C 00 …
+        let out = passcode("beer");
+        assert_eq!(&out[..4], &[0x2B, 0x3F, 0x55, 0x5C]);
+        assert!(out[4..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
     fn encodes_to_16_bytes() {
         let out = passcode("test");
         assert_eq!(out.len(), 16);
