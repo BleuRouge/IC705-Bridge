@@ -11,7 +11,9 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use super::passcode::passcode;
-use super::stream::{spawn_pkt0_idle, spawn_pkt7, spawn_reader, spawn_rx_retransmit, StreamCommon};
+use super::stream::{
+    spawn_pkt0_idle, spawn_pkt7, spawn_reader, spawn_rx_retransmit, StreamCommon, TaskGuard,
+};
 use crate::error::{BridgeError, Result};
 
 pub const CONTROL_PORT: u16 = 50001;
@@ -133,29 +135,32 @@ pub async fn connect_control(host: &str, username: &str, password: &str) -> Resu
     }
     ctrl.auth_id.lock().unwrap().copy_from_slice(&r[26..32]);
 
-    // Boucles de fond + machine à états d'authentification.
+    // Boucles de fond + machine à états d'authentification. La garde abandonne
+    // toutes ces tâches si l'on sort en erreur avant le succès (sinon les
+    // keepalives continueraient et la radio resterait « occupée »).
     let (data_tx, data_rx) = mpsc::unbounded_channel();
     let (ready_tx, ready_rx) = oneshot::channel();
-    let mut handles = vec![
+    let mut guard = TaskGuard::new(vec![
         spawn_reader(common.clone(), data_tx),
         spawn_pkt7(common.clone(), 2),
         spawn_pkt0_idle(common.clone()),
         spawn_rx_retransmit(common.clone()),
         spawn_control_owner(ctrl.clone(), data_rx, ready_tx),
-    ];
+    ]);
 
     ctrl.send_auth(0x02).await?;
     ctrl.send_auth(0x05).await?;
-    handles.push(spawn_reauth(ctrl.clone()));
+    guard.push(spawn_reauth(ctrl.clone()));
 
     match tokio::time::timeout(READY_TIMEOUT, ready_rx).await {
-        Ok(Ok(Ok(()))) => Ok(ControlConnection { control: ctrl, handles }),
+        Ok(Ok(Ok(()))) => Ok(ControlConnection { control: ctrl, handles: guard.disarm() }),
         Ok(Ok(Err(e))) => Err(e),
         Ok(Err(_)) => Err(BridgeError::Protocol("canal de disponibilité fermé".into())),
         Err(_) => Err(BridgeError::Timeout(
             "ouverture du stream serial+audio (la radio n'a pas confirmé)".into(),
         )),
     }
+    // En cas d'`Err`, `guard` est droppée ici → toutes les tâches sont abandonnées.
 }
 
 /// Machine à états : surveille les réponses de la radio, déclenche la demande

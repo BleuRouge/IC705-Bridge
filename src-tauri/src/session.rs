@@ -12,6 +12,7 @@ use tokio::task::JoinHandle;
 use crate::error::Result;
 use crate::rsba1::control::{connect_control, ControlStream};
 use crate::rsba1::serial::{connect_serial, SerialStream};
+use crate::rsba1::stream::TaskGuard;
 use crate::util::to_hex;
 
 /// Capacité du canal de diffusion des trames CI-V reçues.
@@ -58,16 +59,31 @@ impl Session {
     ) -> Result<Self> {
         let connection = connect_control(host, username, password).await?;
 
-        let (civ_tx, _) = broadcast::channel(CIV_CHANNEL_CAP);
-        let (serial, serial_handles) = connect_serial(host, civ_tx.clone()).await?;
+        // Garde RAII : si l'ouverture du serial (ou la suite) échoue, les tâches
+        // de fond du control sont abandonnées proprement. Sinon elles
+        // continueraient leurs keepalives et la radio resterait « occupée »,
+        // bloquant toute reconnexion.
+        let mut guard = TaskGuard::new(connection.handles);
 
-        let mut handles = connection.handles;
-        handles.extend(serial_handles);
+        let (civ_tx, _) = broadcast::channel(CIV_CHANNEL_CAP);
+        let (serial, serial_handles) = match connect_serial(host, civ_tx.clone()).await {
+            Ok(v) => v,
+            Err(e) => {
+                // Best-effort : prévenir la radio qu'on se retire pour qu'elle
+                // libère immédiatement le créneau (sinon attente de son timeout).
+                let _ = connection.control.send_auth(0x01).await; // deauth
+                let _ = connection.control.common.send_disconnect().await;
+                return Err(e); // `guard` droppée ici → tâches control abandonnées.
+            }
+        };
+        for h in serial_handles {
+            guard.push(h);
+        }
 
         // Diffusion des trames CI-V reçues vers le frontend.
         if let Some(app) = app {
             let mut rx = civ_tx.subscribe();
-            handles.push(tokio::spawn(async move {
+            guard.push(tokio::spawn(async move {
                 loop {
                     match rx.recv().await {
                         Ok(frame) => {
@@ -85,7 +101,7 @@ impl Session {
             control: connection.control,
             serial,
             civ_tx,
-            handles,
+            handles: guard.disarm(),
         })
     }
 

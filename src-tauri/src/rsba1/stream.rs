@@ -394,6 +394,41 @@ impl StreamCommon {
     }
 }
 
+/// Garde RAII sur des tâches de fond : si elle est droppée sans `disarm()`,
+/// elle **abandonne** (`abort`) toutes les tâches qu'elle détient.
+///
+/// Indispensable côté connexion : un `JoinHandle` simplement droppé ne tue PAS
+/// la tâche (tokio la détache). Sans cette garde, un échec de connexion après le
+/// démarrage des boucles de keepalive laissait ces boucles tourner indéfiniment
+/// — la radio voyait alors une session toujours active et refusait les
+/// reconnexions suivantes.
+pub struct TaskGuard {
+    handles: Vec<JoinHandle<()>>,
+}
+
+impl TaskGuard {
+    pub fn new(handles: Vec<JoinHandle<()>>) -> Self {
+        Self { handles }
+    }
+
+    pub fn push(&mut self, handle: JoinHandle<()>) {
+        self.handles.push(handle);
+    }
+
+    /// Désarme la garde et restitue les handles (cas succès : les tâches vivent).
+    pub fn disarm(mut self) -> Vec<JoinHandle<()>> {
+        std::mem::take(&mut self.handles)
+    }
+}
+
+impl Drop for TaskGuard {
+    fn drop(&mut self) {
+        for h in &self.handles {
+            h.abort();
+        }
+    }
+}
+
 /// Calcule le `localSID` : `(IP_BE << 16) | (port & 0xffff)` (wrap u32).
 fn compute_local_sid(addr: SocketAddr) -> u32 {
     let ip_u32 = match addr {
@@ -563,5 +598,32 @@ mod tests {
         assert!(rx.on_seq(0x0001)); // wrap : 0xFFFF et 0x0000 manquants
         assert!(rx.missing.contains_key(&0xFFFF));
         assert!(rx.missing.contains_key(&0x0000));
+    }
+
+    #[tokio::test]
+    async fn task_guard_aborts_on_drop() {
+        let ran = Arc::new(AtomicBool::new(false));
+        let r = ran.clone();
+        let guard = TaskGuard::new(vec![tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            r.store(true, Ordering::SeqCst);
+        })]);
+        drop(guard); // doit abandonner la tâche avant qu'elle ne s'exécute
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        assert!(!ran.load(Ordering::SeqCst), "la tâche aurait dû être abandonnée");
+    }
+
+    #[tokio::test]
+    async fn task_guard_disarm_keeps_tasks() {
+        let ran = Arc::new(AtomicBool::new(false));
+        let r = ran.clone();
+        let guard = TaskGuard::new(vec![tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            r.store(true, Ordering::SeqCst);
+        })]);
+        for h in guard.disarm() {
+            let _ = h.await; // désarmée : la tâche survit et termine
+        }
+        assert!(ran.load(Ordering::SeqCst), "la tâche désarmée aurait dû s'exécuter");
     }
 }
