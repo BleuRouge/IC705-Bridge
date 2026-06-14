@@ -21,14 +21,14 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost data:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
     }
   },
   "bundle": {
     "active": true,
     "targets": "all",
     "createUpdaterArtifacts": true,
-    "publisher": "IC705 Bridge",
+    "publisher": "BleuRouge_Fab",
     "category": "Education",
     "shortDescription": "Passerelle CI-V pour l'Icom IC-705 (RS-BA1).",
     "longDescription": "IC705 Bridge connecte un Icom IC-705 en Wi-Fi via le protocole RS-BA1, expose un terminal CI-V intégré et une API HTTP locale pour automatiser les échanges en Python.",
@@ -49,7 +49,7 @@
     },
     "windows": {
       "nsis": {
-        "installMode": "perMachine"
+        "installMode": "currentUser"
       }
     }
   },
