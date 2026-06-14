@@ -108,10 +108,17 @@ pub struct StreamCommon {
 
 impl StreamCommon {
     /// Crée le socket, se connecte à `host:port` et calcule le `localSID`.
+    /// `host` accepte une IP (`192.168.1.200`) ou un nom résolvable (`ic705.local`).
     pub async fn connect(name: &'static str, host: &str, port: u16) -> Result<Arc<Self>> {
-        let remote: SocketAddr = format!("{host}:{port}")
-            .parse()
-            .map_err(|_| BridgeError::Protocol(format!("adresse invalide : {host}:{port}")))?;
+        let remote: SocketAddr = tokio::net::lookup_host((host, port))
+            .await
+            .map_err(|_| {
+                BridgeError::Protocol(format!("hôte introuvable : « {host} » (vérifier l'IP ou le nom)"))
+            })?
+            .next()
+            .ok_or_else(|| {
+                BridgeError::Protocol(format!("hôte introuvable : « {host} »"))
+            })?;
 
         // kappanhang lie le port local au même numéro que le stream. On essaie,
         // puis on retombe sur un port éphémère si déjà utilisé (reconnexion).

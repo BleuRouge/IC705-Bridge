@@ -28,6 +28,15 @@ pub async fn connect(
 ) -> Result<StatusSnapshot> {
     let state = state.inner().clone();
 
+    // Normalise l'hôte : les espaces de copier-coller ou un nom ne doivent pas
+    // faire échouer la résolution.
+    let host = host.trim().to_string();
+    if host.is_empty() {
+        let e = BridgeError::Protocol("renseigner l'IP ou le nom de l'IC-705".into());
+        state.set_status(Some(&app), ConnState::Error, e.to_string(), None);
+        return Err(e);
+    }
+
     // Une seule session à la fois : on ferme la précédente.
     if let Some(old) = state.session.lock().await.take() {
         old.disconnect().await;
