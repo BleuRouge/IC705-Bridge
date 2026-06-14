@@ -23,6 +23,11 @@ function nowTs(): string {
 
 let logSeq = 0;
 
+/** Plafond du terminal : borne mémoire + nombre de nœuds DOM sous flux continu. */
+const MAX_LOG = 2000;
+/** Fenêtre de regroupement des trames avant rendu (~10 Hz). */
+const LOG_FLUSH_MS = 100;
+
 function App() {
   const [tab, setTab] = useState<Tab>("connection");
   const [status, setStatus] = useState<StatusSnapshot>({
@@ -42,7 +47,8 @@ function App() {
   // Terminal CI-V
   const [frame, setFrame] = useState("FE FE A4 E0 03 FD");
   const [log, setLog] = useState<LogEntry[]>([]);
-  const logEndRef = useRef<HTMLDivElement>(null);
+  const pendingLog = useRef<LogEntry[]>([]);
+  const flushTimer = useRef<number | null>(null);
 
   // Mise à jour de l'application
   const [update, setUpdate] = useState<Update | null>(null);
@@ -50,8 +56,25 @@ function App() {
 
   const connected = status.state === "civ_ready";
 
+  // Bufferise les lignes et ne les pousse dans l'état que par lots : sous flux
+  // continu (scope / transceive), un setLog + scroll par trame gelait l'UI.
   function addLog(dir: LogEntry["dir"], text: string) {
-    setLog((l) => [...l, { id: ++logSeq, ts: nowTs(), dir, text }]);
+    pendingLog.current.push({ id: ++logSeq, ts: nowTs(), dir, text });
+    if (flushTimer.current !== null) return;
+    flushTimer.current = window.setTimeout(() => {
+      flushTimer.current = null;
+      const batch = pendingLog.current;
+      pendingLog.current = [];
+      setLog((l) => {
+        const next = l.concat(batch);
+        return next.length > MAX_LOG ? next.slice(next.length - MAX_LOG) : next;
+      });
+    }, LOG_FLUSH_MS);
+  }
+
+  function clearLog() {
+    pendingLog.current = [];
+    setLog([]);
   }
 
   // Abonnements aux événements backend + état initial.
@@ -67,9 +90,12 @@ function App() {
     };
   }, []);
 
+  // Vide le buffer en attente au démontage (évite un setState post-démontage).
   useEffect(() => {
-    logEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [log]);
+    return () => {
+      if (flushTimer.current !== null) window.clearTimeout(flushTimer.current);
+    };
+  }, []);
 
   // Vérifie la présence d'une mise à jour au démarrage (silencieux si à jour
   // ou en dev où l'updater n'est pas joignable).
@@ -179,9 +205,8 @@ function App() {
         ) : (
           <TerminalTab
             frame={frame} setFrame={setFrame}
-            log={log} clear={() => setLog([])}
+            log={log} clear={clearLog}
             onSend={onSend} connected={connected}
-            logEndRef={logEndRef}
           />
         )}
       </main>
@@ -300,9 +325,19 @@ function TerminalTab(props: {
   frame: string; setFrame: (v: string) => void;
   log: LogEntry[]; clear: () => void;
   onSend: () => void; connected: boolean;
-  logEndRef: React.RefObject<HTMLDivElement | null>;
 }) {
   const { frame, setFrame, log, connected } = props;
+  const consoleRef = useRef<HTMLDivElement>(null);
+
+  // Autoscroll « collant » : ne suit le bas que si l'utilisateur y est déjà,
+  // pour ne pas le ramener de force quand il remonte inspecter une trame.
+  useEffect(() => {
+    const el = consoleRef.current;
+    if (!el) return;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    if (nearBottom) el.scrollTop = el.scrollHeight;
+  }, [log]);
+
   return (
     <div className="panel terminal">
       <h2>CI-V Terminal</h2>
@@ -310,7 +345,7 @@ function TerminalTab(props: {
         Saisis une trame CI-V brute en hexadécimal, par ex. <code>FE FE A4 E0 03 FD</code>.
       </p>
 
-      <div className="console">
+      <div className="console" ref={consoleRef}>
         {log.length === 0 && <div className="empty">Aucune trame pour le moment.</div>}
         {log.map((e) => (
           <div key={e.id} className={`line ${e.dir}`}>
@@ -319,7 +354,6 @@ function TerminalTab(props: {
             <span className="data">{e.text}</span>
           </div>
         ))}
-        <div ref={props.logEndRef} />
       </div>
 
       <form className="sendbar" onSubmit={(e) => { e.preventDefault(); props.onSend(); }}>
