@@ -32,7 +32,21 @@ pub fn run() {
 
     let app_state = Arc::new(AppState::new());
 
-    let app = tauri::Builder::default()
+    let builder = tauri::Builder::default();
+
+    // Garrot mono-instance (doit être enregistré en premier) : un second
+    // lancement refocalise la fenêtre existante au lieu de démarrer un processus
+    // concurrent qui échouerait à binder les ports UDP 50001/50002 et l'API 8765.
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.unminimize();
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+    }));
+
+    let app = builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
         .manage(app_state.clone())
