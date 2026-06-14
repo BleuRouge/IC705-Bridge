@@ -28,6 +28,17 @@ const MAX_LOG = 2000;
 /** Fenêtre de regroupement des trames avant rendu (~10 Hz). */
 const LOG_FLUSH_MS = 100;
 
+/** Clés localStorage (on ne mémorise jamais le mot de passe). */
+const LS_HOST = "ic705.host";
+const LS_USER = "ic705.username";
+
+/** Trames CI-V d'exemple (remplissent la saisie, l'étudiant les lit/édite). */
+const PRESETS: { label: string; frame: string }[] = [
+  { label: "Fréquence", frame: "FE FE A4 E0 03 FD" },
+  { label: "Mode", frame: "FE FE A4 E0 04 FD" },
+  { label: "S-mètre", frame: "FE FE A4 E0 15 02 FD" },
+];
+
 function App() {
   const [tab, setTab] = useState<Tab>("connection");
   const [status, setStatus] = useState<StatusSnapshot>({
@@ -38,14 +49,15 @@ function App() {
     api_url: "http://127.0.0.1:8765",
   });
 
-  // Champs de connexion
-  const [host, setHost] = useState("192.168.1.200");
-  const [username, setUsername] = useState("");
+  // Champs de connexion (host/username mémorisés du dernier essai réussi).
+  const [host, setHost] = useState(() => localStorage.getItem(LS_HOST) ?? "192.168.1.200");
+  const [username, setUsername] = useState(() => localStorage.getItem(LS_USER) ?? "");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
 
   // Terminal CI-V
   const [frame, setFrame] = useState("FE FE A4 E0 03 FD");
+  const [sending, setSending] = useState(false);
   const [log, setLog] = useState<LogEntry[]>([]);
   const pendingLog = useRef<LogEntry[]>([]);
   const flushTimer = useRef<number | null>(null);
@@ -122,7 +134,10 @@ function App() {
     try {
       const s = await invoke<StatusSnapshot>("connect", { host, username, password });
       setStatus(s);
-      addLog("info", `Connecté à ${host}`);
+      // Mémorise l'hôte/username de l'essai réussi (jamais le mot de passe).
+      localStorage.setItem(LS_HOST, host.trim());
+      localStorage.setItem(LS_USER, username);
+      addLog("info", `Connecté à ${host.trim()}`);
       setTab("terminal");
     } catch (err) {
       addLog("error", String(err));
@@ -146,14 +161,19 @@ function App() {
 
   async function onSend() {
     const f = frame.trim();
-    if (!f) return;
+    if (!f || sending) return;
+    setSending(true);
     addLog("tx", f);
     try {
-      // L'envoi déclenche les trames RX, affichées en temps réel via l'événement
-      // `civ-rx`. On ignore donc la réponse agrégée renvoyée ici (évite les doublons).
-      await invoke<CivResult>("send_civ", { frame: f });
+      // Les trames RX s'affichent en temps réel via l'événement `civ-rx` : on
+      // ne se sert de la réponse agrégée que pour signaler une absence de
+      // réponse (sinon double affichage des trames reçues).
+      const res = await invoke<CivResult>("send_civ", { frame: f });
+      if (!res.response) addLog("info", "(pas de réponse)");
     } catch (err) {
       addLog("error", String(err));
+    } finally {
+      setSending(false);
     }
   }
 
@@ -207,6 +227,7 @@ function App() {
             frame={frame} setFrame={setFrame}
             log={log} clear={clearLog}
             onSend={onSend} connected={connected}
+            sending={sending}
           />
         )}
       </main>
@@ -324,9 +345,9 @@ function StatusLine({ ok, label }: { ok: boolean; label: string }) {
 function TerminalTab(props: {
   frame: string; setFrame: (v: string) => void;
   log: LogEntry[]; clear: () => void;
-  onSend: () => void; connected: boolean;
+  onSend: () => void; connected: boolean; sending: boolean;
 }) {
-  const { frame, setFrame, log, connected } = props;
+  const { frame, setFrame, log, connected, sending } = props;
   const consoleRef = useRef<HTMLDivElement>(null);
 
   // Autoscroll « collant » : ne suit le bas que si l'utilisateur y est déjà,
@@ -356,6 +377,22 @@ function TerminalTab(props: {
         ))}
       </div>
 
+      <div className="presets">
+        <span className="presets-label">Exemples :</span>
+        {PRESETS.map((p) => (
+          <button
+            key={p.label}
+            type="button"
+            className="chip"
+            onClick={() => setFrame(p.frame)}
+            disabled={!connected}
+            title={p.frame}
+          >
+            {p.label}
+          </button>
+        ))}
+      </div>
+
       <form className="sendbar" onSubmit={(e) => { e.preventDefault(); props.onSend(); }}>
         <input
           value={frame}
@@ -364,7 +401,9 @@ function TerminalTab(props: {
           spellCheck={false}
           disabled={!connected}
         />
-        <button type="submit" className="btn primary" disabled={!connected}>Send</button>
+        <button type="submit" className="btn primary" disabled={!connected || sending}>
+          {sending ? "…" : "Send"}
+        </button>
         <button type="button" className="btn" onClick={props.clear}>Clear</button>
       </form>
       {!connected && <div className="warn">Connecte-toi à l'IC-705 dans l'onglet Connection.</div>}
