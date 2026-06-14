@@ -115,6 +115,28 @@ pub async fn connect_control(host: &str, username: &str, password: &str) -> Resu
     let common = StreamCommon::connect("control", host, CONTROL_PORT).await?;
     common.handshake().await?;
 
+    // À partir du handshake, la radio nous a enregistrés. Sur TOUT échec ultérieur
+    // (login refusé, auth refusée, timeout…), on lui envoie un disconnect pour
+    // qu'elle libère immédiatement sa session de contrôle. Sans ça, un mauvais mot
+    // de passe laissait la session ouverte côté radio et bloquait toutes les
+    // connexions suivantes jusqu'à son propre timeout.
+    match authenticate_control(&common, username, password).await {
+        Ok(conn) => Ok(conn),
+        Err(e) => {
+            let _ = common.send_disconnect().await;
+            Err(e)
+        }
+    }
+}
+
+/// Login + authentification + ouverture du serial sur un stream de contrôle déjà
+/// « handshaké ». Toute sortie en erreur est rattrapée par [`connect_control`],
+/// qui se charge d'avertir la radio.
+async fn authenticate_control(
+    common: &Arc<StreamCommon>,
+    username: &str,
+    password: &str,
+) -> Result<ControlConnection> {
     let ctrl = Arc::new(ControlStream {
         common: common.clone(),
         auth_inner_seq: AtomicU16::new(0),
