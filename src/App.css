@@ -175,7 +175,23 @@ h2 { margin: 0 0 4px; font-size: 18px; }
 .line.error .data { color: var(--danger); }
 .line .data { white-space: pre-wrap; word-break: break-all; }
 
-.sendbar { display: flex; gap: 10px; margin-top: 14px; }
+/* Presets CI-V */
+.presets { display: flex; align-items: center; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+.presets-label { color: var(--muted); font-size: 12px; }
+.chip {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 12px;
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+  font-family: var(--mono);
+}
+.chip:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.chip:disabled { opacity: .4; cursor: not-allowed; }
+
+.sendbar { display: flex; gap: 10px; margin-top: 12px; }
 .sendbar input {
   flex: 1;
   background: var(--panel);

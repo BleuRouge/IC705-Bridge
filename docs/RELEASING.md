@@ -103,9 +103,39 @@ manuelle.
 
 ```bash
 pnpm install
-pnpm tauri dev      # lancement en développement
-pnpm tauri build    # build de production pour l'OS courant (dans src-tauri/target/release/bundle)
+pnpm tauri dev      # lancement en développement (la CSP de prod n'y est PAS appliquée)
 ```
+
+### Tester l'app packagée sans rien signer
+
+Pour juste vérifier l'app de production (ex. valider la CSP), on construit le
+DMG seul : il n'est pas une cible « updater », donc aucune clé n'est requise.
+
+```bash
+pnpm tauri build --bundles dmg
+open "src-tauri/target/release/bundle/dmg/IC705 Bridge_0.1.0_aarch64.dmg"
+```
+
+### Build de production complet (avec artefact + signature updater)
+
+`createUpdaterArtifacts: true` fait signer l'artefact updater : un build complet
+exige donc la **clé privée minisign** en variable d'environnement (la nôtre a été
+générée **sans mot de passe**, cf. §1) :
+
+```bash
+export TAURI_SIGNING_PRIVATE_KEY="$(cat .tauri/ic705bridge_updater.key)"
+export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
+pnpm tauri build
+```
+
+Sans ces variables, le build échoue à la fin sur
+`A public key has been found, but no private key`.
+
+> **macOS — DMG :** l'emballage `.dmg` pilote le Finder via AppleScript. Au
+> premier build, macOS demande d'autoriser le terminal à contrôler le Finder
+> (Réglages Système → Confidentialité et sécurité → Automatisation). Si c'est
+> refusé, le DMG échoue (`bundle_dmg.sh`) — réautoriser, ou `tccutil reset
+> AppleEvents`, puis relancer. Le `.app` lui est déjà construit dans tous les cas.
 
 Depuis un Mac, `pnpm tauri build` ne produit que les bundles macOS. Les
 installeurs Windows et Linux ne peuvent être produits que par le CI (ou des

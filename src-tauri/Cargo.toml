@@ -1,6 +1,6 @@
 [package]
 name = "ic705-bridge"
-version = "0.1.0"
+version = "0.1.1"
 description = "IC705 Bridge — passerelle pédagogique CI-V pour l'Icom IC-705"
 authors = ["BleuRouge_Fab"]
 edition = "2021"
@@ -25,9 +25,13 @@ serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 axum = "0.7"
-tower-http = { version = "0.6", features = ["cors"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rand = "0.8"
 tauri-plugin-updater = "2.10.1"
 tauri-plugin-process = "2.3.1"
+
+# Garrot mono-instance (desktop uniquement) : refocalise la fenêtre existante
+# au lieu de lancer un 2e processus qui se battrait pour les ports UDP/HTTP.
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-single-instance = "2"

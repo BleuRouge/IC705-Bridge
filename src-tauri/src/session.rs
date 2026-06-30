@@ -12,6 +12,7 @@ use tokio::task::JoinHandle;
 use crate::error::Result;
 use crate::rsba1::control::{connect_control, ControlStream};
 use crate::rsba1::serial::{connect_serial, SerialStream};
+use crate::rsba1::stream::TaskGuard;
 use crate::util::to_hex;
 
 /// Capacité du canal de diffusion des trames CI-V reçues.
@@ -58,16 +59,31 @@ impl Session {
     ) -> Result<Self> {
         let connection = connect_control(host, username, password).await?;
 
-        let (civ_tx, _) = broadcast::channel(CIV_CHANNEL_CAP);
-        let (serial, serial_handles) = connect_serial(host, civ_tx.clone()).await?;
+        // Garde RAII : si l'ouverture du serial (ou la suite) échoue, les tâches
+        // de fond du control sont abandonnées proprement. Sinon elles
+        // continueraient leurs keepalives et la radio resterait « occupée »,
+        // bloquant toute reconnexion.
+        let mut guard = TaskGuard::new(connection.handles);
 
-        let mut handles = connection.handles;
-        handles.extend(serial_handles);
+        let (civ_tx, _) = broadcast::channel(CIV_CHANNEL_CAP);
+        let (serial, serial_handles) = match connect_serial(host, civ_tx.clone()).await {
+            Ok(v) => v,
+            Err(e) => {
+                // Best-effort : prévenir la radio qu'on se retire pour qu'elle
+                // libère immédiatement le créneau (sinon attente de son timeout).
+                let _ = connection.control.send_auth(0x01).await; // deauth
+                let _ = connection.control.common.send_disconnect().await;
+                return Err(e); // `guard` droppée ici → tâches control abandonnées.
+            }
+        };
+        for h in serial_handles {
+            guard.push(h);
+        }
 
         // Diffusion des trames CI-V reçues vers le frontend.
         if let Some(app) = app {
             let mut rx = civ_tx.subscribe();
-            handles.push(tokio::spawn(async move {
+            guard.push(tokio::spawn(async move {
                 loop {
                     match rx.recv().await {
                         Ok(frame) => {
@@ -85,7 +101,7 @@ impl Session {
             control: connection.control,
             serial,
             civ_tx,
-            handles,
+            handles: guard.disarm(),
         })
     }
 
@@ -171,6 +187,11 @@ mod tests {
 
     const RADIO_SID: u32 = 0xDEAD_BEEF;
     const CIV_RESPONSE: [u8; 11] = [0xFE, 0xFE, 0xE0, 0xA4, 0x03, 0x00, 0x00, 0x05, 0x45, 0x01, 0xFD];
+
+    /// Sérialise les tests qui réservent les ports UDP 50001/50002 (sinon ils se
+    /// disputeraient le bind en parallèle). Mutex tokio : sûr à tenir au travers
+    /// des `.await` du test.
+    static PORT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     /// En-tête 16 octets côté radio : localSID = SID radio, remoteSID = SID client.
     fn header(len: u32, typ: u8, seq: u16, radio_sid: u32, client_sid: u32) -> Vec<u8> {
@@ -275,6 +296,7 @@ mod tests {
 
     #[tokio::test]
     async fn full_session_over_mock_radio() {
+        let _lock = PORT_LOCK.lock().await;
         let control = UdpSocket::bind("127.0.0.1:50001")
             .await
             .expect("port UDP 50001 occupé (RS-BA1 / le bridge tourne ?)");
@@ -294,5 +316,67 @@ mod tests {
         assert_eq!(resp, CIV_RESPONSE);
 
         session.disconnect().await;
+    }
+
+    /// Non-régression : des identifiants refusés doivent (a) renvoyer
+    /// `InvalidCredentials` et (b) envoyer un disconnect à la radio pour libérer
+    /// la session de contrôle — sinon le login suivant reste bloqué.
+    #[tokio::test]
+    async fn bad_credentials_release_radio_session() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let _lock = PORT_LOCK.lock().await;
+        let got_disconnect = Arc::new(AtomicBool::new(false));
+
+        let control = UdpSocket::bind("127.0.0.1:50001")
+            .await
+            .expect("port UDP 50001 occupé (RS-BA1 / le bridge tourne ?)");
+        let gd = got_disconnect.clone();
+        let server = tokio::spawn(async move {
+            let mut buf = [0u8; 2048];
+            loop {
+                let Ok((n, peer)) = control.recv_from(&mut buf).await else { return };
+                let r = &buf[..n];
+                if r.len() < 16 {
+                    continue;
+                }
+                let client_sid = u32::from_be_bytes([r[8], r[9], r[10], r[11]]);
+                match (r.len(), r[4]) {
+                    (16, 0x03) => {
+                        let p = header(16, 0x04, 0, RADIO_SID, client_sid);
+                        let _ = control.send_to(&p, peer).await;
+                    }
+                    (16, 0x06) => {
+                        let mut p = header(16, 0x06, 0, RADIO_SID, client_sid);
+                        p[6] = 0x01;
+                        let _ = control.send_to(&p, peer).await;
+                    }
+                    (16, 0x05) => gd.store(true, Ordering::SeqCst), // disconnect reçu
+                    (128, 0x00) if r[0] == 0x80 => {
+                        // login -> réponse 0x60 avec le marqueur « identifiants refusés ».
+                        let mut p = header(96, 0x00, 0, RADIO_SID, client_sid);
+                        p.resize(96, 0);
+                        p[48..52].copy_from_slice(&[0xff, 0xff, 0xff, 0xfe]);
+                        let _ = control.send_to(&p, peer).await;
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        let res = crate::rsba1::control::connect_control("127.0.0.1", "user", "badpass").await;
+        assert!(
+            matches!(res, Err(crate::error::BridgeError::InvalidCredentials)),
+            "des identifiants refusés doivent renvoyer InvalidCredentials"
+        );
+
+        // Laisse le disconnect best-effort atteindre la radio simulée.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(
+            got_disconnect.load(Ordering::SeqCst),
+            "la radio doit recevoir un disconnect pour libérer la session de contrôle"
+        );
+
+        server.abort();
     }
 }

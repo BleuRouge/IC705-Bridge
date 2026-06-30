@@ -10,8 +10,9 @@ use std::convert::Infallible;
 use std::sync::Arc;
 
 use axum::{
-    extract::State,
-    http::StatusCode,
+    extract::{Request, State},
+    http::{header, StatusCode},
+    middleware::{self, Next},
     response::sse::{Event, KeepAlive, Sse},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -19,7 +20,6 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use tokio_stream::{wrappers::BroadcastStream, StreamExt};
-use tower_http::cors::CorsLayer;
 
 use crate::commands::CivResult;
 use crate::state::{AppState, StatusSnapshot, API_ADDR};
@@ -37,6 +37,25 @@ struct ApiError {
 
 fn err(code: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<ApiError>) {
     (code, Json(ApiError { error: msg.into() }))
+}
+
+/// Hôtes acceptés dans l'en-tête `Host` (doivent correspondre à [`API_ADDR`]).
+const ALLOWED_HOSTS: [&str; 2] = ["127.0.0.1:8765", "localhost:8765"];
+
+/// Garde anti-DNS-rebinding : l'API n'écoute que sur la loopback, mais le
+/// navigateur d'une page web malveillante peut tout de même la viser via un nom
+/// qui résout vers 127.0.0.1. On rejette donc tout `Host` non loopback. Combiné
+/// à l'absence de CORS, cela empêche une page web de piloter la radio.
+async fn guard_local_host(req: Request, next: Next) -> Response {
+    let allowed = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .is_some_and(|h| ALLOWED_HOSTS.contains(&h));
+    if !allowed {
+        return err(StatusCode::FORBIDDEN, "hôte non autorisé").into_response();
+    }
+    next.run(req).await
 }
 
 async fn index() -> impl IntoResponse {
@@ -102,7 +121,7 @@ pub async fn serve(state: Arc<AppState>) {
         .route("/status", get(status_handler))
         .route("/civ", post(civ_handler))
         .route("/stream", get(stream_handler))
-        .layer(CorsLayer::permissive())
+        .layer(middleware::from_fn(guard_local_host))
         .with_state(state.clone());
 
     match tokio::net::TcpListener::bind(API_ADDR).await {
