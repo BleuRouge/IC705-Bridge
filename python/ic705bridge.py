@@ -1,107 +1,65 @@
-"""Client Python bas niveau pour IC705 Bridge.
-
-IC705 Bridge expose une API HTTP locale (par défaut http://127.0.0.1:8765).
-Cette librairie remplace le port COM virtuel : on lui envoie des trames CI-V
-brutes et elle renvoie la réponse de l'IC-705.
-
-La connexion à la radio (IP, username, password) se fait dans l'application
-IC705 Bridge. Côté Python, on se contente d'envoyer des trames une fois l'app
-connectée.
-
-Aucune dépendance externe (urllib de la stdlib uniquement).
-
-Exemple
--------
-    from ic705bridge import IC705Bridge
-
-    rig = IC705Bridge()                 # http://127.0.0.1:8765 par défaut
-    print(rig.status())
-
-    rep = rig.send_civ("FE FE A4 E0 03 FD")
-    print("TX:", rep["tx"])
-    print("RX:", rep["response"])
-"""
-
 from __future__ import annotations
 
 import json
 import urllib.error
 import urllib.request
-from typing import Iterator
+from typing import Iterable, Iterator, Optional, Union
 
-__all__ = ["IC705Bridge", "BridgeError"]
+__all__ = ["IC705Bridge", "BridgeError", "split_frames", "to_hex", "__version__"]
+
+__version__ = "0.1.1"
 
 DEFAULT_URL = "http://127.0.0.1:8765"
 
+#: En-tête envoyé par la lib ; l'app le réclame pour distinguer un vrai client
+#: d'une page web malveillante (qui ne peut pas l'ajouter sans préflight CORS).
+AUTH_HEADER = "X-IC705-Bridge"
+
+Frame = Union[str, bytes, bytearray, Iterable[int]]
+
 
 class BridgeError(RuntimeError):
-    """Erreur renvoyée par l'API IC705 Bridge (ou de transport HTTP)."""
+    pass
 
 
 class IC705Bridge:
-    """Client de l'API locale IC705 Bridge."""
-
     def __init__(self, url: str = DEFAULT_URL, timeout: float = 5.0) -> None:
         self.url = url.rstrip("/")
         self.timeout = timeout
 
-    # -- API publique --------------------------------------------------------
+    def __repr__(self) -> str:
+        return f"IC705Bridge(url={self.url!r})"
 
     def status(self) -> dict:
-        """Renvoie l'état de la connexion (dict : state, host, api_url, ...)."""
         return self._get("/status")
 
-    def send_civ(self, frame_hex: str) -> dict:
-        """Envoie une trame CI-V (hex, ex. "FE FE A4 E0 03 FD").
-
-        Renvoie un dict ``{"tx": "...", "response": "..."}`` où ``response``
-        contient les octets reçus de la radio (chaîne hex, éventuellement vide
-        si la commande n'attend pas de réponse).
-        """
-        return self._post("/civ", {"frame": frame_hex})
+    def send_civ(self, frame: Frame) -> dict:
+        return self._post("/civ", {"frame": to_hex(frame)})
 
     def is_ready(self) -> bool:
-        """True si le tunnel CI-V est prêt (radio connectée)."""
         try:
             return self.status().get("state") == "civ_ready"
         except BridgeError:
             return False
 
-    # -- stream_civ() : flux temps réel des trames reçues -------------------
-
-    def stream_civ(self) -> Iterator[str]:
-        """Itère sur les trames CI-V reçues de la radio (flux SSE `/stream`).
-
-        Chaque élément est une trame hex (ex. ``"FE FE E0 A4 03 ... FD"``).
-        Idéal pour le monitoring / waterfall : toutes les trames reçues passent
-        ici, y compris les réponses aux commandes et les données scope ``27 00``.
-
-        Le générateur bloque tant que la connexion est ouverte. Il lève
-        :class:`BridgeError` si l'app n'est pas joignable ou pas connectée à la
-        radio (HTTP 503) ; relancer alors l'itération après un court délai.
-        """
+    def stream_civ(self, timeout: Optional[float] = None) -> Iterator[str]:
         req = urllib.request.Request(
-            self.url + "/stream", headers={"Accept": "text/event-stream"}
+            self.url + "/stream",
+            headers={"Accept": "text/event-stream", AUTH_HEADER: "1"},
         )
         try:
-            # timeout=None : on bloque (le keep-alive SSE maintient le flux ouvert).
-            resp = urllib.request.urlopen(req, timeout=None)
+            resp = urllib.request.urlopen(req, timeout=timeout)
         except urllib.error.HTTPError as e:
-            detail = e.read().decode("utf-8", "replace")
-            raise BridgeError(f"{e.code} {e.reason}: {detail}") from e
+            raise BridgeError(_http_detail(e)) from e
         except urllib.error.URLError as e:
-            raise BridgeError(
-                f"IC705 Bridge injoignable sur {self.url} "
-                f"(l'application est-elle lancée ?) : {e.reason}"
-            ) from e
-
-        with resp:
+            raise BridgeError(_unreachable(self.url, e)) from e
+        try:
             for raw in resp:
                 line = raw.decode("utf-8", "replace").rstrip("\r\n")
                 if line.startswith("data:"):
                     yield line[5:].strip()
-
-    # -- Transport HTTP ------------------------------------------------------
+        finally:
+            resp.close()
 
     def _get(self, path: str) -> dict:
         return self._request("GET", path, None)
@@ -109,27 +67,81 @@ class IC705Bridge:
     def _post(self, path: str, body: dict) -> dict:
         return self._request("POST", path, body)
 
-    def _request(self, method: str, path: str, body: dict | None) -> dict:
+    def _request(self, method: str, path: str, body: Optional[dict]) -> dict:
         data = json.dumps(body).encode("utf-8") if body is not None else None
-        headers = {"Content-Type": "application/json"} if data else {}
+        headers = {AUTH_HEADER: "1"}
+        if data:
+            headers["Content-Type"] = "application/json"
         req = urllib.request.Request(self.url + path, data=data, headers=headers, method=method)
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                return json.loads(resp.read().decode("utf-8"))
+                raw = resp.read().decode("utf-8")
         except urllib.error.HTTPError as e:
-            detail = e.read().decode("utf-8", "replace")
-            try:
-                detail = json.loads(detail).get("error", detail)
-            except json.JSONDecodeError:
-                pass
-            raise BridgeError(f"{e.code} {e.reason}: {detail}") from e
+            raise BridgeError(_http_detail(e)) from e
         except urllib.error.URLError as e:
-            raise BridgeError(
-                f"IC705 Bridge injoignable sur {self.url} "
-                f"(l'application est-elle lancée ?) : {e.reason}"
-            ) from e
+            raise BridgeError(_unreachable(self.url, e)) from e
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as e:
+            raise BridgeError(f"réponse non-JSON de {self.url}{path} : {raw[:120]!r}") from e
+        if not isinstance(payload, dict):
+            raise BridgeError(f"réponse JSON inattendue (objet attendu) : {payload!r}")
+        return payload
+
+
+def to_hex(frame: Frame) -> str:
+    if isinstance(frame, str):
+        cleaned = (
+            frame.replace("0x", " ").replace("0X", " ")
+            .replace(",", " ").replace(";", " ").replace(":", " ").replace("-", " ")
+        )
+        digits = "".join(cleaned.split())
+        if len(digits) % 2 != 0:
+            raise BridgeError(f"nombre impair de chiffres hexadécimaux ({len(digits)})")
+        try:
+            data = bytes.fromhex(digits)
+        except ValueError as e:
+            raise BridgeError(f"trame hexadécimale invalide : {frame!r}") from e
+    else:
+        try:
+            data = bytes(frame)
+        except (TypeError, ValueError) as e:
+            raise BridgeError(f"octets de trame invalides : {frame!r}") from e
+    return " ".join(f"{b:02X}" for b in data)
+
+
+def split_frames(response: Frame) -> list[str]:
+    hexstr = to_hex(response)
+    data = bytes.fromhex(hexstr.replace(" ", "")) if hexstr else b""
+    frames: list[str] = []
+    i, n = 0, len(data)
+    while i + 1 < n:
+        if data[i] == 0xFE and data[i + 1] == 0xFE:
+            end = data.find(0xFD, i + 2)
+            if end == -1:
+                break
+            frames.append(" ".join(f"{b:02X}" for b in data[i : end + 1]))
+            i = end + 1
+        else:
+            i += 1
+    return frames
+
+
+def _http_detail(e: urllib.error.HTTPError) -> str:
+    detail = e.read().decode("utf-8", "replace")
+    try:
+        detail = json.loads(detail).get("error", detail)
+    except json.JSONDecodeError:
+        pass
+    return f"{e.code} {e.reason}: {detail}"
+
+
+def _unreachable(url: str, e: urllib.error.URLError) -> str:
+    return (
+        f"IC705 Bridge injoignable sur {url} "
+        f"(l'application est-elle lancée ?) : {e.reason}"
+    )
 
 
 if __name__ == "__main__":
-    rig = IC705Bridge()
-    print("Status:", rig.status())
+    print("Status:", IC705Bridge().status())

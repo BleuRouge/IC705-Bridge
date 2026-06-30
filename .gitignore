@@ -18,6 +18,11 @@ reference/
 # Python
 __pycache__/
 *.py[cod]
+*.egg-info/
+build/
+wheelhouse/
+*.whl
+.pytest_cache/
 .venv/
 venv/
 

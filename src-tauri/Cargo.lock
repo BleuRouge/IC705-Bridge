@@ -1686,6 +1686,7 @@ dependencies = [
  "tauri-plugin-updater",
  "tokio",
  "tokio-stream",
+ "tower",
  "tracing",
  "tracing-subscriber",
 ]

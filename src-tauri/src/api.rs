@@ -42,10 +42,16 @@ fn err(code: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<ApiError>)
 /// Hôtes acceptés dans l'en-tête `Host` (doivent correspondre à [`API_ADDR`]).
 const ALLOWED_HOSTS: [&str; 2] = ["127.0.0.1:8765", "localhost:8765"];
 
-/// Garde anti-DNS-rebinding : l'API n'écoute que sur la loopback, mais le
-/// navigateur d'une page web malveillante peut tout de même la viser via un nom
-/// qui résout vers 127.0.0.1. On rejette donc tout `Host` non loopback. Combiné
-/// à l'absence de CORS, cela empêche une page web de piloter la radio.
+/// En-tête réclamé sur les endpoints sensibles. Une page web ne peut pas
+/// l'ajouter en cross-origin sans déclencher un préflight (que l'absence de
+/// CORS fait échouer) : défense en profondeur par-dessus la garde `Host`.
+const AUTH_HEADER: &str = "x-ic705-bridge";
+
+/// Garde locale : (1) anti-DNS-rebinding — l'API n'écoute que sur la loopback,
+/// mais une page web malveillante peut la viser via un nom qui résout vers
+/// 127.0.0.1, d'où le rejet de tout `Host` non loopback ; (2) en-tête
+/// `X-IC705-Bridge` exigé sur `/civ` et `/stream` pour bloquer un envoi de
+/// trame (PTT inclus) depuis un navigateur. La librairie Python l'envoie.
 async fn guard_local_host(req: Request, next: Next) -> Response {
     let allowed = req
         .headers()
@@ -55,6 +61,17 @@ async fn guard_local_host(req: Request, next: Next) -> Response {
     if !allowed {
         return err(StatusCode::FORBIDDEN, "hôte non autorisé").into_response();
     }
+
+    let path = req.uri().path();
+    let sensitive = path == "/civ" || path == "/stream";
+    if sensitive && req.headers().get(AUTH_HEADER).is_none() {
+        return err(
+            StatusCode::FORBIDDEN,
+            "en-tête X-IC705-Bridge requis (utilisez la librairie Python)",
+        )
+        .into_response();
+    }
+
     next.run(req).await
 }
 
@@ -114,15 +131,20 @@ async fn stream_handler(State(st): State<Arc<AppState>>) -> Response {
     Sse::new(stream).keep_alive(KeepAlive::default()).into_response()
 }
 
-/// Démarre le serveur HTTP local. Boucle jusqu'à l'arrêt de l'application.
-pub async fn serve(state: Arc<AppState>) {
-    let app = Router::new()
+/// Construit le routeur de l'API locale (garde locale incluse).
+fn router(state: Arc<AppState>) -> Router {
+    Router::new()
         .route("/", get(index))
         .route("/status", get(status_handler))
         .route("/civ", post(civ_handler))
         .route("/stream", get(stream_handler))
         .layer(middleware::from_fn(guard_local_host))
-        .with_state(state.clone());
+        .with_state(state)
+}
+
+/// Démarre le serveur HTTP local. Boucle jusqu'à l'arrêt de l'application.
+pub async fn serve(state: Arc<AppState>) {
+    let app = router(state.clone());
 
     match tokio::net::TcpListener::bind(API_ADDR).await {
         Ok(listener) => {
@@ -136,5 +158,78 @@ pub async fn serve(state: Arc<AppState>) {
         Err(e) => {
             tracing::error!("impossible de démarrer l'API locale sur {API_ADDR} : {e}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt; // pour `oneshot`
+
+    fn app() -> Router {
+        router(Arc::new(AppState::new()))
+    }
+
+    async fn status_of(req: Request<Body>) -> StatusCode {
+        app().oneshot(req).await.unwrap().status()
+    }
+
+    #[tokio::test]
+    async fn rejects_bad_host() {
+        let req = Request::builder()
+            .uri("/status")
+            .header(header::HOST, "evil.example.com")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(status_of(req).await, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn allows_status_on_localhost_without_header() {
+        let req = Request::builder()
+            .uri("/status")
+            .header(header::HOST, API_ADDR)
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(status_of(req).await, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn rejects_civ_without_auth_header() {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/civ")
+            .header(header::HOST, API_ADDR)
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"frame":"FE FE A4 E0 03 FD"}"#))
+            .unwrap();
+        assert_eq!(status_of(req).await, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn civ_with_header_passes_guard_then_503_not_connected() {
+        // En-tête présent : la garde laisse passer ; le handler répond 503
+        // car aucune session n'est connectée (≠ 403 de la garde).
+        let req = Request::builder()
+            .method("POST")
+            .uri("/civ")
+            .header(header::HOST, "localhost:8765")
+            .header("content-type", "application/json")
+            .header(AUTH_HEADER, "1")
+            .body(Body::from(r#"{"frame":"FE FE A4 E0 03 FD"}"#))
+            .unwrap();
+        assert_eq!(status_of(req).await, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn rejects_stream_without_auth_header() {
+        let req = Request::builder()
+            .uri("/stream")
+            .header(header::HOST, API_ADDR)
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(status_of(req).await, StatusCode::FORBIDDEN);
     }
 }

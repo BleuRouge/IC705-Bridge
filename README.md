@@ -103,14 +103,23 @@ pnpm build                     # type-check + build frontend
 | `POST`  | `/civ`    | `{"frame": "FE FE A4 E0 03 FD"}` | `{"tx": "...", "response": "..."}` |
 | `GET`   | `/stream` | —                             | flux SSE des trames CI-V reçues (une trame hex/événement) |
 
+> **Sécurité.** L'API n'écoute que sur la boucle locale, valide l'en-tête `Host`
+> (anti-DNS-rebinding) et exige l'en-tête `X-IC705-Bridge` sur `/civ` et `/stream`.
+> Une page web ne peut pas ajouter cet en-tête en cross-origin (préflight refusé,
+> CORS absent), ce qui empêche un site malveillant d'envoyer des trames (PTT
+> inclus). La librairie Python l'envoie automatiquement.
+
 Un moniteur d'exemple ([`python/monitor.py`](python/monitor.py)) consomme
 `/stream` pour afficher un **waterfall** du scope + les paramètres de la radio
 (`pip install matplotlib numpy`).
 
 ### Librairie Python
 
+Paquet installable (`pip install ./python` ou `uv add ./python`), sans dépendance
+externe (stdlib uniquement).
+
 ```python
-from ic705bridge import IC705Bridge
+from ic705bridge import IC705Bridge, split_frames
 
 rig = IC705Bridge()                 # http://127.0.0.1:8765 par défaut
 print(rig.status())
@@ -118,10 +127,17 @@ print(rig.status())
 rep = rig.send_civ("FE FE A4 E0 03 FD")
 print("TX:", rep["tx"])
 print("RX:", rep["response"])
+for f in split_frames(rep["response"]):    # sépare écho + réponse radio
+    print(f)
+
+for frame in rig.stream_civ():      # flux CI-V temps réel (générateur)
+    print(frame)
 ```
 
-API bas niveau : `status()`, `send_civ(frame_hex)`, `is_ready()`
-(`stream_civ()` viendra plus tard). Voir `python/example.py`.
+API bas niveau : `status()`, `send_civ(frame)` (hex ou octets), `is_ready()`,
+`stream_civ()` ; utilitaires `split_frames()` / `to_hex()`. Catalogue des trames
+STATUS/RX/TX dans [`python/COMMANDS.md`](python/COMMANDS.md), démo dans
+[`python/example.py`](python/example.py), tests dans `python/tests/`.
 
 ---
 
@@ -129,7 +145,8 @@ API bas niveau : `status()`, `send_civ(frame_hex)`, `is_ready()`
 
 - [x] Cœur réseau RS-BA1 (handshake, login/auth, keepalive, CI-V TX/RX)
 - [x] Onglets Connection & CI-V Terminal
-- [x] API HTTP locale + librairie Python
+- [x] API HTTP locale (`/status`, `/civ`, `/stream` SSE) + garde locale (Host + en-tête)
+- [x] Librairie Python packagée pip/uv (STATUS/RX/TX, `stream_civ()`, catalogue, tests)
 - [ ] Test contre un IC-705 réel
-- [ ] `stream_civ()` (flux CI-V temps réel côté Python)
+- [ ] Corrélation réponse↔commande CI-V + erreur explicite au timeout
 - [ ] Retransmission RX / réordonnancement des paquets serial
