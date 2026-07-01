@@ -140,3 +140,60 @@ Sans ces variables, le build échoue à la fin sur
 Depuis un Mac, `pnpm tauri build` ne produit que les bundles macOS. Les
 installeurs Windows et Linux ne peuvent être produits que par le CI (ou des
 machines/VMs dédiées) — c'est précisément le rôle du workflow de release.
+
+---
+
+## 6. Publier la librairie Python sur PyPI
+
+La librairie [`ic705bridge`](../python/) est publiée séparément de l'application
+(elle évolue moins souvent). Le workflow
+[`.github/workflows/publish-python.yml`](../.github/workflows/publish-python.yml)
+construit le `sdist` + `wheel` et les pousse sur **PyPI** via le **Trusted
+Publishing** (OIDC) : aucun token à stocker dans le dépôt.
+
+### Configuration unique côté PyPI
+
+1. Crée un compte sur [pypi.org](https://pypi.org) (le nom `ic705bridge` est
+   disponible au moment de l'écriture — à réserver avant que quelqu'un d'autre ne
+   le prenne).
+2. Déclare un **« pending publisher »** (avant la 1re publication) :
+   *PyPI → Account settings → Publishing → Add a pending publisher* :
+   - **PyPI Project Name** : `ic705bridge`
+   - **Owner** : `BleuRouge`
+   - **Repository name** : `IC705-Bridge`
+   - **Workflow name** : `publish-python.yml`
+   - **Environment** : *(laisser vide)*
+
+> Alternative sans Trusted Publishing : créer un token PyPI, l'ajouter en secret
+> `PYPI_API_TOKEN`, et remplacer l'étape de publication par
+> `with: { password: ${{ secrets.PYPI_API_TOKEN }} }`. Le Trusted Publishing est
+> préférable (rien à faire tourner/renouveler).
+
+### Publier une version
+
+1. Aligne la version dans [`python/ic705bridge.py`](../python/ic705bridge.py)
+   (`__version__`, lu dynamiquement par hatchling).
+2. Tag dédié (préfixe `py-v`, distinct des tags `v*` de l'app) :
+   ```bash
+   git tag py-v0.1.1
+   git push origin py-v0.1.1
+   ```
+   → le workflow construit et publie sur PyPI.
+
+On peut aussi lancer le workflow **manuellement** (onglet *Actions → Publish
+Python lib → Run workflow*) pour republier sans tag.
+
+### Vérifier / construire en local
+
+```bash
+cd python
+python -m pip install --upgrade build twine
+python -m build            # -> dist/*.whl + dist/*.tar.gz
+python -m twine check dist/*   # conformité des métadonnées PyPI
+```
+
+Une fois publiée, l'installation « propre » devient :
+
+```bash
+pip install ic705bridge
+```
