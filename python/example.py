@@ -10,9 +10,11 @@ MODES = {
 
 
 def reply_payload(response_hex, cmd):
+    """Extrait le payload de la réponse radio (trame `FE FE <ctrl> <radio> <cmd> … FD`)."""
+    radio, ctrl = int(RADIO, 16), int(CTRL, 16)
     for frame in split_frames(response_hex):
         b = bytes.fromhex(frame.replace(" ", ""))
-        if len(b) >= 6 and b[2] == 0xE0 and b[3] == 0xA4 and b[4] == cmd:
+        if len(b) >= 6 and b[2] == ctrl and b[3] == radio and b[4] == cmd:
             return b[5:-1]
     return None
 
@@ -63,12 +65,12 @@ def main():
 
     rep = rig.send_civ(f"FE FE {RADIO} {CTRL} 15 02 FD")       # S-mètre
     payload = reply_payload(rep["response"], 0x15)
-    if payload:
+    if payload and len(payload) >= 3:
         print(f"  S-mètre    : {decode_bcd_int(payload[1:])} / 255")
 
     rep = rig.send_civ(f"FE FE {RADIO} {CTRL} 1C 00 FD")       # statut PTT
     payload = reply_payload(rep["response"], 0x1C)
-    if payload:
+    if payload and len(payload) >= 2:
         print(f"  PTT        : {'TX' if payload[1] else 'RX'}")
 
     # === TX (écritures sûres : on règle sans émettre) ===
