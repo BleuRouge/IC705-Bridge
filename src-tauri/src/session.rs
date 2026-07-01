@@ -248,6 +248,15 @@ mod tests {
     /// des `.await` du test.
     static PORT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+    /// Arrête une radio simulée et ATTEND sa fin réelle : son socket doit être
+    /// libéré avant de relâcher [`PORT_LOCK`], sinon le test suivant peut
+    /// trouver le port encore occupé (le drop des tâches détachées n'arrive
+    /// qu'au shutdown du runtime, APRÈS la libération du verrou).
+    async fn stop_mock(handle: tokio::task::JoinHandle<()>) {
+        handle.abort();
+        let _ = handle.await;
+    }
+
     /// En-tête 16 octets côté radio : localSID = SID radio, remoteSID = SID client.
     fn header(len: u32, typ: u8, seq: u16, radio_sid: u32, client_sid: u32) -> Vec<u8> {
         let mut p = vec![0u8; 16];
@@ -358,8 +367,8 @@ mod tests {
         let serial = UdpSocket::bind("127.0.0.1:50002")
             .await
             .expect("port UDP 50002 occupé (RS-BA1 / le bridge tourne ?)");
-        tokio::spawn(mock_control(control));
-        tokio::spawn(mock_serial(serial));
+        let mock_ctl = tokio::spawn(mock_control(control));
+        let mock_ser = tokio::spawn(mock_serial(serial));
 
         let session = Session::connect("127.0.0.1", "user", "pass", None)
             .await
@@ -371,6 +380,8 @@ mod tests {
         assert_eq!(resp, CIV_RESPONSE);
 
         session.disconnect().await;
+        stop_mock(mock_ctl).await;
+        stop_mock(mock_ser).await;
     }
 
     /// Radio qui disparaît (éteinte / Wi-Fi coupé) : le watchdog doit signaler
@@ -393,9 +404,10 @@ mod tests {
         let mut link = session.link_lost_watch();
         assert!(!*link.borrow(), "le lien doit être vivant après la connexion");
 
-        // La radio « meurt » : plus aucune réponse.
-        mock_ctl.abort();
-        mock_ser.abort();
+        // La radio « meurt » : plus aucune réponse (attendre la fin réelle des
+        // mocks pour que leurs sockets soient bien fermés).
+        stop_mock(mock_ctl).await;
+        stop_mock(mock_ser).await;
 
         tokio::time::timeout(Duration::from_secs(5), link.wait_for(|lost| *lost))
             .await
@@ -464,6 +476,6 @@ mod tests {
             "la radio doit recevoir un disconnect pour libérer la session de contrôle"
         );
 
-        server.abort();
+        stop_mock(server).await;
     }
 }
