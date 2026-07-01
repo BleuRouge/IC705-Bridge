@@ -2,6 +2,11 @@
 
 use crate::error::{BridgeError, Result};
 
+/// Taille max d'une trame CI-V acceptée en saisie (les vraies trames font
+/// quelques octets à ~500 pour le scope) : au-delà, l'envoi UDP échouerait de
+/// toute façon (EMSGSIZE) avec une erreur incompréhensible.
+const MAX_FRAME_BYTES: usize = 1024;
+
 /// Formate des octets en hex majuscule séparé par des espaces : `FE FE A4 E0 03 FD`.
 pub fn to_hex(d: &[u8]) -> String {
     d.iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(" ")
@@ -29,6 +34,12 @@ pub fn parse_hex(input: &str) -> Result<Vec<u8>> {
     }
     if let Some(bad) = cleaned.chars().find(|c| !c.is_ascii_hexdigit()) {
         return Err(BridgeError::InvalidFrame(format!("caractère invalide : '{bad}'")));
+    }
+    if cleaned.len() / 2 > MAX_FRAME_BYTES {
+        return Err(BridgeError::InvalidFrame(format!(
+            "trame trop longue ({} octets, max {MAX_FRAME_BYTES})",
+            cleaned.len() / 2
+        )));
     }
 
     let bytes = (0..cleaned.len())
@@ -62,5 +73,13 @@ mod tests {
     #[test]
     fn roundtrip() {
         assert_eq!(to_hex(&[0xFE, 0xFE, 0xA4, 0xE0, 0x03, 0xFD]), "FE FE A4 E0 03 FD");
+    }
+
+    #[test]
+    fn rejects_oversized_frame() {
+        let huge = "FF".repeat(MAX_FRAME_BYTES + 1);
+        assert!(parse_hex(&huge).is_err());
+        let ok = "FF".repeat(MAX_FRAME_BYTES);
+        assert_eq!(parse_hex(&ok).unwrap().len(), MAX_FRAME_BYTES);
     }
 }

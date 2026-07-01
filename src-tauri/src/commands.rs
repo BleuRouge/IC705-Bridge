@@ -37,6 +37,13 @@ pub async fn connect(
         return Err(e);
     }
 
+    // Une seule tentative de connexion à la fois : deux `connect` concurrents
+    // créeraient deux sessions dont une serait écrasée SANS deauth (radio
+    // « occupée »). L'UI désactive le bouton, mais pas un invoke direct.
+    let Ok(_connecting) = state.connecting.try_lock() else {
+        return Err(BridgeError::Protocol("une connexion est déjà en cours".into()));
+    };
+
     // Une seule session à la fois : on ferme la précédente.
     if let Some(old) = state.session.lock().await.take() {
         old.disconnect().await;
@@ -46,7 +53,9 @@ pub async fn connect(
 
     match Session::connect(&host, &username, &password, Some(app.clone())).await {
         Ok(session) => {
-            *state.session.lock().await = Some(session);
+            let session = Arc::new(session);
+            *state.session.lock().await = Some(session.clone());
+            spawn_link_supervisor(app.clone(), state.clone(), session);
             state.set_status(
                 Some(&app),
                 ConnState::CivReady,
@@ -60,6 +69,34 @@ pub async fn connect(
             Err(e)
         }
     }
+}
+
+/// Surveille la perte de lien signalée par la session (radio éteinte, Wi-Fi
+/// coupé…) : retire la session de l'état et passe le statut en erreur, pour que
+/// l'UI et l'API cessent d'afficher un tunnel « prêt » qui ne l'est plus.
+fn spawn_link_supervisor(app: AppHandle, state: Arc<AppState>, session: Arc<Session>) {
+    let mut link = session.link_lost_watch();
+    tokio::spawn(async move {
+        // `changed()` renvoie Err si la session est détruite proprement
+        // (disconnect/drop) : dans ce cas il n'y a rien à nettoyer.
+        if link.wait_for(|lost| *lost).await.is_err() {
+            return;
+        }
+        let mut guard = state.session.lock().await;
+        // Ne retirer QUE la session qu'on supervise : l'utilisateur a pu déjà
+        // se reconnecter (nouvelle session) pendant la détection.
+        if guard.as_ref().is_some_and(|s| Arc::ptr_eq(s, &session)) {
+            *guard = None;
+            drop(guard);
+            session.disconnect().await; // best-effort + arrêt des tâches
+            state.set_status(
+                Some(&app),
+                ConnState::Error,
+                "Connexion radio perdue (radio éteinte ou Wi-Fi coupé ?)",
+                None,
+            );
+        }
+    });
 }
 
 /// Déconnecte la session active.
@@ -79,8 +116,15 @@ pub async fn send_civ(state: State<'_, Arc<AppState>>, frame: String) -> Result<
     let state = state.inner().clone();
     let bytes = parse_hex(&frame)?;
 
-    let guard = state.session.lock().await;
-    let session = guard.as_ref().ok_or(BridgeError::NotConnected)?;
+    // Clone de l'Arc puis relâchement du verrou : l'attente de réponse (jusqu'à
+    // ~1,5 s) ne doit pas bloquer les autres émetteurs (API Python, terminal).
+    let session = state
+        .session
+        .lock()
+        .await
+        .as_ref()
+        .cloned()
+        .ok_or(BridgeError::NotConnected)?;
     let response = session.send_civ(&bytes).await?;
 
     Ok(CivResult {

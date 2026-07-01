@@ -6,13 +6,13 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
 
 use crate::error::Result;
 use crate::rsba1::control::{connect_control, ControlStream};
 use crate::rsba1::serial::{connect_serial, SerialStream};
-use crate::rsba1::stream::TaskGuard;
+use crate::rsba1::stream::{StreamCommon, TaskGuard};
 use crate::util::to_hex;
 
 /// Capacité du canal de diffusion des trames CI-V reçues.
@@ -24,6 +24,19 @@ const RESP_IDLE_GAP: Duration = Duration::from_millis(200);
 /// Fenêtre totale max de collecte d'une réponse : borne le cas où la radio
 /// streame en continu (transceive / scope ON), sinon la collecte ne finirait jamais.
 const RESP_MAX_WINDOW: Duration = Duration::from_millis(1500);
+
+/// Silence simultané des deux streams au-delà duquel le lien est déclaré perdu.
+/// En fonctionnement normal la radio répond aux pings pkt7 toutes les ~3 s :
+/// 10 s = plus de 3 pings sans réponse. (Raccourci en test.)
+#[cfg(not(test))]
+const LINK_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(test)]
+const LINK_TIMEOUT: Duration = Duration::from_millis(1200);
+/// Cadence de vérification du watchdog de lien.
+#[cfg(not(test))]
+const LINK_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+#[cfg(test)]
+const LINK_CHECK_INTERVAL: Duration = Duration::from_millis(150);
 
 /// État de connexion exposé au frontend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -41,10 +54,12 @@ pub enum ConnState {
 pub struct Session {
     #[allow(dead_code)] // info de session, utile au debug / futurs usages
     pub host: String,
-    #[allow(dead_code)]
     control: Arc<ControlStream>,
     serial: Arc<SerialStream>,
     civ_tx: broadcast::Sender<Vec<u8>>,
+    /// Passe à `true` quand le watchdog déclare le lien radio perdu. Le canal
+    /// se ferme (sans `true`) si la session est détruite proprement.
+    link_lost_rx: watch::Receiver<bool>,
     handles: Vec<JoinHandle<()>>,
 }
 
@@ -80,6 +95,16 @@ impl Session {
             guard.push(h);
         }
 
+        // Watchdog de perte de lien : la radio émet en continu (réponses aux
+        // pings pkt7, idles). Si les DEUX streams restent muets au-delà de
+        // LINK_TIMEOUT, le lien est déclaré perdu (radio éteinte, Wi-Fi coupé).
+        let (link_tx, link_lost_rx) = watch::channel(false);
+        guard.push(spawn_link_watchdog(
+            connection.control.common.clone(),
+            serial.common.clone(),
+            link_tx,
+        ));
+
         // Diffusion des trames CI-V reçues vers le frontend.
         if let Some(app) = app {
             let mut rx = civ_tx.subscribe();
@@ -101,6 +126,7 @@ impl Session {
             control: connection.control,
             serial,
             civ_tx,
+            link_lost_rx,
             handles: guard.disarm(),
         })
     }
@@ -156,9 +182,18 @@ impl Session {
         self.civ_tx.subscribe()
     }
 
+    /// Récepteur du signal de perte de lien : passe à `true` si la radio ne
+    /// donne plus signe de vie (voir [`LINK_TIMEOUT`]). Le canal se ferme sans
+    /// signal si la session est détruite proprement.
+    pub fn link_lost_watch(&self) -> watch::Receiver<bool> {
+        self.link_lost_rx.clone()
+    }
+
     /// Déconnexion propre : ferme le canal serial, envoie les déconnexions et
-    /// arrête toutes les tâches de fond.
-    pub async fn disconnect(self) {
+    /// arrête toutes les tâches de fond. Prend `&self` (la session vit dans un
+    /// `Arc` partagé) ; un `send_civ` encore en vol se termine sur une réponse
+    /// vide, sans panique.
+    pub async fn disconnect(&self) {
         let _ = self.serial.send_open_close(true).await;
         let _ = self.serial.common.send_disconnect().await;
         let _ = self.control.send_auth(0x01).await; // deauth
@@ -176,6 +211,26 @@ impl Drop for Session {
             h.abort();
         }
     }
+}
+
+/// Vérifie périodiquement que la radio émet toujours ; signale la perte de
+/// lien quand les deux streams sont muets depuis plus de [`LINK_TIMEOUT`].
+fn spawn_link_watchdog(
+    control: Arc<StreamCommon>,
+    serial: Arc<StreamCommon>,
+    link_tx: watch::Sender<bool>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(LINK_CHECK_INTERVAL);
+        ticker.tick().await; // consomme le tick immédiat
+        loop {
+            ticker.tick().await;
+            if control.silent_for() > LINK_TIMEOUT && serial.silent_for() > LINK_TIMEOUT {
+                let _ = link_tx.send(true);
+                break; // le signal est permanent : la tâche a fini son travail
+            }
+        }
+    })
 }
 
 /// Tests d'intégration : une radio IC-705 simulée (UDP local) déroule le
@@ -314,6 +369,38 @@ mod tests {
         let resp = session.send_civ(&tx).await.expect("envoi CI-V");
         // L'écho de notre trame doit être écarté, seule la réponse reste.
         assert_eq!(resp, CIV_RESPONSE);
+
+        session.disconnect().await;
+    }
+
+    /// Radio qui disparaît (éteinte / Wi-Fi coupé) : le watchdog doit signaler
+    /// la perte de lien au lieu de laisser la session « prête » pour toujours.
+    #[tokio::test]
+    async fn watchdog_detects_dead_radio() {
+        let _lock = PORT_LOCK.lock().await;
+        let control = UdpSocket::bind("127.0.0.1:50001")
+            .await
+            .expect("port UDP 50001 occupé (RS-BA1 / le bridge tourne ?)");
+        let serial = UdpSocket::bind("127.0.0.1:50002")
+            .await
+            .expect("port UDP 50002 occupé (RS-BA1 / le bridge tourne ?)");
+        let mock_ctl = tokio::spawn(mock_control(control));
+        let mock_ser = tokio::spawn(mock_serial(serial));
+
+        let session = Session::connect("127.0.0.1", "user", "pass", None)
+            .await
+            .expect("connexion à la radio simulée");
+        let mut link = session.link_lost_watch();
+        assert!(!*link.borrow(), "le lien doit être vivant après la connexion");
+
+        // La radio « meurt » : plus aucune réponse.
+        mock_ctl.abort();
+        mock_ser.abort();
+
+        tokio::time::timeout(Duration::from_secs(5), link.wait_for(|lost| *lost))
+            .await
+            .expect("le watchdog n'a pas signalé la perte de lien à temps")
+            .expect("canal du watchdog fermé sans signal");
 
         session.disconnect().await;
     }
