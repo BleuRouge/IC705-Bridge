@@ -47,7 +47,6 @@ pub fn run() {
     }));
 
     let app = builder
-        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
         .manage(app_state.clone())
         .setup(move |app| {
@@ -72,30 +71,62 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("erreur à la construction de l'application Tauri");
 
-    app.run(|app_handle, event| {
-        // Fermeture de la fenêtre : on prévient la radio avant de quitter, sinon
-        // elle conserve une session pendante et refuse la prochaine connexion.
-        if let tauri::RunEvent::WindowEvent {
+    // Toute sortie de l'app doit prévenir la radio (deauth/disconnect), sinon
+    // elle garde une session pendante et refuse la prochaine connexion. Deux
+    // portes de sortie existent : la fermeture de fenêtre (CloseRequested) et
+    // la sortie « application » (ExitRequested : Cmd+Q / menu Quitter sur
+    // macOS, qui ne passe PAS par CloseRequested). Les deux convergent vers
+    // `begin_shutdown`, idempotent.
+    app.run(|app_handle, event| match &event {
+        tauri::RunEvent::WindowEvent {
             event: tauri::WindowEvent::CloseRequested { api, .. },
             ..
-        } = &event
-        {
-            let state = app_handle.state::<Arc<AppState>>().inner().clone();
-            // Rien à fermer ? On laisse la fenêtre se fermer normalement.
-            if state.session.try_lock().map(|g| g.is_none()).unwrap_or(false) {
+        } => {
+            if begin_shutdown(app_handle) {
+                api.prevent_close();
+            }
+        }
+        tauri::RunEvent::ExitRequested { api, code, .. } => {
+            // `code.is_some()` = exit()/restart() programmatique : soit notre
+            // propre `exit(0)` post-nettoyage, soit le relaunch de mise à jour
+            // (le frontend se déconnecte avant d'installer) → laisser sortir.
+            if code.is_some() {
                 return;
             }
-            api.prevent_close();
-            let handle = app_handle.clone();
-            tauri::async_runtime::spawn(async move {
-                if let Some(session) = state.session.lock().await.take() {
-                    // Borné par un timeout : la fermeture ne doit jamais rester
-                    // bloquée si le réseau ne répond plus.
-                    let _ =
-                        tokio::time::timeout(SHUTDOWN_DISCONNECT_TIMEOUT, session.disconnect()).await;
-                }
-                handle.exit(0);
-            });
+            if begin_shutdown(app_handle) {
+                api.prevent_exit();
+            }
         }
+        _ => {}
     });
+}
+
+/// Lance (une seule fois) la déconnexion propre de la radio avant la sortie.
+/// Renvoie `true` si la sortie doit être retardée (un `exit(0)` suivra),
+/// `false` s'il n'y a rien à nettoyer (sortie immédiate autorisée).
+fn begin_shutdown(app_handle: &tauri::AppHandle) -> bool {
+    use std::sync::atomic::Ordering;
+
+    let state = app_handle.state::<Arc<AppState>>().inner().clone();
+    if state.shutdown_started.swap(true, Ordering::SeqCst) {
+        // Nettoyage déjà en cours : retarder cette sortie-ci, l'`exit(0)` de
+        // la tâche en vol conclura.
+        return true;
+    }
+    // Pas de session active ? Rien à nettoyer : on rend le flag (une session
+    // pourrait encore être créée si cette sortie est ensuite annulée).
+    if state.session.try_lock().map(|g| g.is_none()).unwrap_or(false) {
+        state.shutdown_started.store(false, Ordering::SeqCst);
+        return false;
+    }
+    let handle = app_handle.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Some(session) = state.session.lock().await.take() {
+            // Borné par un timeout : la sortie ne doit jamais rester bloquée
+            // si le réseau ne répond plus.
+            let _ = tokio::time::timeout(SHUTDOWN_DISCONNECT_TIMEOUT, session.disconnect()).await;
+        }
+        handle.exit(0);
+    });
+    true
 }

@@ -122,6 +122,10 @@ function App() {
   async function onInstallUpdate() {
     if (!update) return;
     try {
+      // Déconnecter la radio AVANT le redémarrage de mise à jour : le relaunch
+      // ne repasse pas par la fermeture de fenêtre, la radio garderait sinon
+      // une session pendante (reconnexion refusée après l'update).
+      await invoke("disconnect").catch(() => {});
       await installUpdate(update, setUpdateProgress);
       // L'app redémarre ; ce code n'est normalement pas atteint.
     } catch (err) {
