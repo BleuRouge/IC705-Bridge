@@ -92,9 +92,14 @@ async fn civ_handler(
 ) -> Result<Json<CivResult>, (StatusCode, Json<ApiError>)> {
     let bytes = parse_hex(&req.frame).map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
 
-    let guard = st.session.lock().await;
-    let session = guard
+    // Clone de l'Arc puis relâchement du verrou : l'attente de réponse (jusqu'à
+    // ~1,5 s) ne doit pas sérialiser les clients (terminal + scripts Python).
+    let session = st
+        .session
+        .lock()
+        .await
         .as_ref()
+        .cloned()
         .ok_or_else(|| err(StatusCode::SERVICE_UNAVAILABLE, "non connecté à l'IC-705"))?;
 
     let response = session

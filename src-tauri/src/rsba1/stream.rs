@@ -104,6 +104,10 @@ pub struct StreamCommon {
     pkt0: Mutex<Pkt0State>,
     pkt7: Mutex<Pkt7State>,
     rx: StdMutex<RxState>,
+    /// Instant du dernier paquet reçu, quel qu'il soit (pings inclus) : sert au
+    /// watchdog de perte de lien. En fonctionnement normal la radio émet en
+    /// continu (réponses pkt7, idles) — un long silence = lien mort.
+    last_rx_at: StdMutex<Instant>,
 }
 
 impl StreamCommon {
@@ -150,7 +154,13 @@ impl StreamCommon {
                 last_seq: None,
                 missing: HashMap::new(),
             }),
+            last_rx_at: StdMutex::new(Instant::now()),
         }))
+    }
+
+    /// Durée écoulée depuis le dernier paquet reçu de la radio.
+    pub fn silent_for(&self) -> Duration {
+        self.last_rx_at.lock().unwrap().elapsed()
     }
 
     fn local_sid(&self) -> u32 {
@@ -354,6 +364,14 @@ impl StreamCommon {
             while body.len() >= 4 {
                 let start = u16::from_le_bytes([body[0], body[1]]);
                 let end = u16::from_le_bytes([body[2], body[3]]);
+                // Borne la plage : on ne bufferise que TX_BUF_MAX paquets, une
+                // plage plus large est forcément invalide (paquet corrompu ou
+                // forgé — sans borne, `start > end` ferait émettre ~131 000
+                // datagrammes d'un coup).
+                if end.wrapping_sub(start) as usize >= TX_BUF_MAX {
+                    body = &body[4..];
+                    continue;
+                }
                 let mut s = start;
                 loop {
                     self.retransmit_one(s).await?;
@@ -458,6 +476,7 @@ pub fn spawn_reader(common: Arc<StreamCommon>, data_tx: mpsc::UnboundedSender<Ve
                 Ok(n) => n,
                 Err(_) => break,
             };
+            *common.last_rx_at.lock().unwrap() = Instant::now();
             let r = buf[..n].to_vec();
             if StreamCommon::is_pkt7(&r) {
                 let _ = common.handle_pkt7(&r).await;

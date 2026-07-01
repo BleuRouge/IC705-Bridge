@@ -1,5 +1,6 @@
 //! État applicatif partagé entre les commandes Tauri et l'API HTTP locale.
 
+use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 
 use serde::Serialize;
@@ -42,8 +43,17 @@ impl StatusInfo {
 }
 
 /// État global de l'application.
+///
+/// La session est un `Arc` : les émetteurs (`send_civ` du terminal et de l'API)
+/// clonent l'Arc puis RELÂCHENT le verrou avant d'attendre la réponse radio
+/// (~1,5 s max). Sans cela, terminal et scripts Python se sérialisaient.
 pub struct AppState {
-    pub session: Mutex<Option<Session>>,
+    pub session: Mutex<Option<Arc<Session>>>,
+    /// Garrot anti-connexions concurrentes (voir `commands::connect`).
+    pub connecting: Mutex<()>,
+    /// `true` dès qu'une tâche de déconnexion-avant-sortie est lancée
+    /// (voir `lib.rs::begin_shutdown`) — évite de la lancer deux fois.
+    pub shutdown_started: std::sync::atomic::AtomicBool,
     pub status: StdMutex<StatusInfo>,
 }
 
@@ -51,6 +61,8 @@ impl AppState {
     pub fn new() -> Self {
         Self {
             session: Mutex::new(None),
+            connecting: Mutex::new(()),
+            shutdown_started: std::sync::atomic::AtomicBool::new(false),
             status: StdMutex::new(StatusInfo {
                 state: ConnState::Disconnected,
                 message: "Déconnecté".into(),
