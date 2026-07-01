@@ -11,6 +11,12 @@ trames). Aucune dépendance externe (stdlib uniquement).
 ## Installation
 
 ```bash
+pip install ic705bridge          # depuis PyPI (recommandé)
+```
+
+Ou depuis les sources (dossier `python/` du dépôt) :
+
+```bash
 pip install .          # depuis le dossier python/
 # ou
 uv add ./python

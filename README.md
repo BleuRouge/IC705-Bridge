@@ -115,8 +115,9 @@ Un moniteur d'exemple ([`python/monitor.py`](python/monitor.py)) consomme
 
 ### Librairie Python
 
-Paquet installable (`pip install ./python` ou `uv add ./python`), sans dépendance
-externe (stdlib uniquement).
+Paquet installable depuis PyPI (`pip install ic705bridge`) ou depuis les sources
+(`pip install ./python`, `uv add ./python`), sans dépendance externe (stdlib
+uniquement).
 
 ```python
 from ic705bridge import IC705Bridge, split_frames
@@ -147,6 +148,7 @@ STATUS/RX/TX dans [`python/COMMANDS.md`](python/COMMANDS.md), démo dans
 - [x] Onglets Connection & CI-V Terminal
 - [x] API HTTP locale (`/status`, `/civ`, `/stream` SSE) + garde locale (Host + en-tête)
 - [x] Librairie Python packagée pip/uv (STATUS/RX/TX, `stream_civ()`, catalogue, tests)
+- [x] Publication PyPI de la lib (workflow Trusted Publishing sur tag `py-v*`)
 - [ ] Test contre un IC-705 réel
 - [ ] Corrélation réponse↔commande CI-V + erreur explicite au timeout
 - [ ] Retransmission RX / réordonnancement des paquets serial
