@@ -16,7 +16,8 @@ Pré-requis :
 
 Pré-requis radio :
     MENU > SCOPE : le scope doit être affiché/actif sur l'IC-705.
-    CI-V Transceive = ON (réglages réseau) pour les mises à jour automatiques.
+    CI-V Transceive (réglage 1A 05 0131) : vérifié au démarrage et activé
+    automatiquement s'il est OFF (nécessaire aux mises à jour automatiques).
 
 Usage :
     python monitor.py [--url http://127.0.0.1:8765] [--rows 200] [--radio A4]
@@ -56,6 +57,9 @@ CMD_READ_SMETER = (0x15, 0x02)
 CMD_SCOPE_ON = (0x27, 0x10, 0x01)  # scope display ON
 CMD_SCOPE_DATA_ON = (0x27, 0x11, 0x01)  # sortie des données waveform ON
 CMD_SCOPE_DATA_OFF = (0x27, 0x11, 0x00)
+# CI-V Transceive (IC-705 : réglage 1A 05 n°0131, cf. CI-V Reference Guide).
+CMD_TRANSCEIVE_READ = (0x1A, 0x05, 0x01, 0x31)
+CMD_TRANSCEIVE_ON = (0x1A, 0x05, 0x01, 0x31, 0x01)
 
 # --- Format de la trame scope 27 00 (réseau, voir spec §12-F) --------------
 # Après "27 00" : en-tête d'info de 16 octets, puis les échantillons, puis FD.
@@ -172,10 +176,11 @@ class Monitor:
 
     def _poll_loop(self) -> None:
         """Active le scope puis interroge périodiquement freq/mode/S-mètre."""
-        # Attendre que la radio soit prête, puis activer la sortie scope.
+        # Attendre que la radio soit prête, puis activer transceive + scope.
         while not self.stop.is_set():
             try:
                 if self.bridge.is_ready():
+                    self._ensure_transceive()
                     self._send(*CMD_SCOPE_ON)
                     self._send(*CMD_SCOPE_DATA_ON)
                     break
@@ -190,6 +195,39 @@ class Monitor:
                 self._send(*cmd)
                 time.sleep(0.2)
             time.sleep(0.4)
+
+    def _read_transceive(self) -> int | None:
+        """Lit le réglage CI-V Transceive (1A 05 0131). None si indéterminé."""
+        try:
+            rep = self.bridge.send_civ(build_frame(*CMD_TRANSCEIVE_READ))
+        except BridgeError as e:
+            print(f"[transceive] lecture impossible : {e}")
+            return None
+        for frame in split_frames(hex_to_bytes(rep.get("response", ""))):
+            # Réponse attendue : FE FE E0 A4 1A 05 01 31 <val> FD.
+            if (
+                len(frame) >= 10
+                and frame[3] == RADIO_ADDR
+                and frame[4:8] == bytes(CMD_TRANSCEIVE_READ)
+            ):
+                return frame[8]
+        return None
+
+    def _ensure_transceive(self) -> None:
+        """Active CI-V Transceive si la radio l'a sur OFF (requis pour le flux)."""
+        value = self._read_transceive()
+        if value is None:
+            print("[transceive] état CI-V Transceive indéterminé — on continue")
+            return
+        if value == 0x01:
+            return
+        print("[transceive] CI-V Transceive est OFF — activation automatique…")
+        self._send(*CMD_TRANSCEIVE_ON)
+        if self._read_transceive() == 0x01:
+            print("[transceive] CI-V Transceive activé.")
+        else:
+            print("[transceive] échec d'activation — mises à jour auto indisponibles "
+                  "(activez-le sur la radio : MENU > SET > Connectors > CI-V)")
 
     def _send(self, *payload: int) -> None:
         """Envoie une commande CI-V (la réponse arrivera via le flux SSE)."""
