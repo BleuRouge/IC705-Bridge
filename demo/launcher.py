@@ -20,6 +20,8 @@ DEMO_DIR = Path(__file__).resolve().parent
 REPO_ROOT = DEMO_DIR.parent
 MONITOR = REPO_ROOT / "python" / "monitor.py"
 LOG_FILE = DEMO_DIR / "ic705-bridge.log"
+DEFAULT_API_PORT = 8765
+MIN_API_PORT = 1024
 
 
 def fetch_status(base_url: str, timeout: float = 1.0) -> dict[str, Any] | None:
@@ -208,9 +210,27 @@ def parse_radio_address(value: str) -> int:
     return parsed
 
 
+def parse_api_port(value: str) -> int:
+    try:
+        parsed = int(value, 10)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("port TCP attendu, par exemple 8765") from error
+    if not MIN_API_PORT <= parsed <= 65535:
+        raise argparse.ArgumentTypeError(
+            f"le port doit être compris entre {MIN_API_PORT} et 65535"
+        )
+    return parsed
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--url", default="http://127.0.0.1:8765", help="URL de l'API locale")
+    parser.add_argument(
+        "--port",
+        type=parse_api_port,
+        default=DEFAULT_API_PORT,
+        help=f"port TCP local de l'API (défaut : {DEFAULT_API_PORT})",
+    )
+    parser.add_argument("--url", help="URL complète de l'API (prioritaire sur --port)")
     parser.add_argument("--rows", type=int, default=160, help="profondeur du waterfall")
     parser.add_argument("--radio", type=parse_radio_address, help="adresse CI-V, ex. 0xA4")
     parser.add_argument(
@@ -238,21 +258,22 @@ def main() -> int:
         raise SystemExit("--rows doit être strictement positif")
 
     app_process: subprocess.Popen[bytes] | None = None
-    status = fetch_status(args.url)
+    base_url = args.url or f"http://127.0.0.1:{args.port}"
+    status = fetch_status(base_url)
     if status is None and not args.no_launch:
         print("Démarrage d'IC705 Bridge…")
         app_process, method = launch_app(args.source)
         print(f"  Mode : {method}")
         if method.startswith("sources"):
             print(f"  Journal : {LOG_FILE}")
-        status = wait_for_api(args.url, args.app_timeout, app_process)
+        status = wait_for_api(base_url, args.app_timeout, app_process)
     elif status is not None:
         print("IC705 Bridge est déjà ouvert.")
     else:
-        status = wait_for_api(args.url, args.app_timeout, app_process)
+        status = wait_for_api(base_url, args.app_timeout, app_process)
 
-    wait_for_radio(args.url, status, app_process)
-    exit_code = run_monitor(args.url, args.radio, args.rows)
+    wait_for_radio(base_url, status, app_process)
+    exit_code = run_monitor(base_url, args.radio, args.rows)
     print("\nDémo terminée. IC705 Bridge reste ouvert pour permettre une déconnexion propre.")
     return exit_code
 

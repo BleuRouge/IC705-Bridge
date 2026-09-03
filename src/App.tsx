@@ -34,10 +34,27 @@ const LOG_FLUSH_MS = 100;
 const WINDOW_WIDTH = 980;
 const WINDOW_HEIGHT = 720;
 const WINDOW_MARGIN = 32;
+const DEFAULT_API_PORT = 8765;
+const MIN_API_PORT = 1024;
+const DEFAULT_RADIO_HOST = "192.168.59.1";
+const DEFAULT_RADIO_PASSWORD = "bouter20XX";
 
 /** Clés localStorage (on ne mémorise jamais le mot de passe). */
 const LS_HOST = "ic705.host";
 const LS_USER = "ic705.username";
+const LS_API_PORT = "ic705.apiPort";
+
+function parseApiPort(value: string): number | null {
+  const port = Number(value);
+  return Number.isInteger(port) && port >= MIN_API_PORT && port <= 65535
+    ? port
+    : null;
+}
+
+function initialApiPort(): string {
+  const saved = localStorage.getItem(LS_API_PORT);
+  return saved && parseApiPort(saved) !== null ? saved : String(DEFAULT_API_PORT);
+}
 
 /** Trames CI-V d'exemple (remplissent la saisie, l'étudiant les lit/édite). */
 const PRESETS: { label: string; frame: string }[] = [
@@ -53,13 +70,15 @@ function App() {
     message: "Déconnecté",
     host: null,
     api_running: false,
+    api_port: DEFAULT_API_PORT,
     api_url: "http://127.0.0.1:8765",
   });
 
   // Champs de connexion (host/username mémorisés du dernier essai réussi).
-  const [host, setHost] = useState(() => localStorage.getItem(LS_HOST) ?? "192.168.1.200");
+  const [host, setHost] = useState(() => localStorage.getItem(LS_HOST) ?? DEFAULT_RADIO_HOST);
   const [username, setUsername] = useState(() => localStorage.getItem(LS_USER) ?? "");
-  const [password, setPassword] = useState("");
+  const [password, setPassword] = useState(DEFAULT_RADIO_PASSWORD);
+  const [apiPort, setApiPort] = useState(initialApiPort);
   const [busy, setBusy] = useState(false);
 
   // Terminal CI-V
@@ -119,7 +138,19 @@ function App() {
 
   // Abonnements aux événements backend + état initial.
   useEffect(() => {
-    invoke<StatusSnapshot>("get_status").then(setStatus).catch(() => {});
+    async function initializeStatus() {
+      try {
+        let current = await invoke<StatusSnapshot>("get_status");
+        const desiredPort = parseApiPort(apiPort) ?? DEFAULT_API_PORT;
+        if (current.api_port !== desiredPort) {
+          current = await invoke<StatusSnapshot>("set_api_port", { port: desiredPort });
+        }
+        setStatus(current);
+      } catch {
+        // En aperçu web (hors Tauri), les commandes ne sont pas disponibles.
+      }
+    }
+    void initializeStatus();
 
     const unStatus = listen<StatusSnapshot>("status", (e) => setStatus(e.payload));
     const unCiv = listen<string>("civ-rx", (e) => addLog("rx", e.payload));
@@ -162,8 +193,16 @@ function App() {
   }
 
   async function onConnect() {
+    const port = parseApiPort(apiPort);
+    if (port === null) {
+      addLog("error", `Le port API doit être compris entre ${MIN_API_PORT} et 65535.`);
+      return;
+    }
     setBusy(true);
     try {
+      const apiStatus = await invoke<StatusSnapshot>("set_api_port", { port });
+      setStatus(apiStatus);
+      localStorage.setItem(LS_API_PORT, String(port));
       const s = await invoke<StatusSnapshot>("connect", { host, username, password });
       setStatus(s);
       // Mémorise l'hôte/username de l'essai réussi (jamais le mot de passe).
@@ -249,6 +288,7 @@ function App() {
             host={host} setHost={setHost}
             username={username} setUsername={setUsername}
             password={password} setPassword={setPassword}
+            apiPort={apiPort} setApiPort={setApiPort}
             busy={busy} status={status}
             onConnect={onConnect} onDisconnect={onDisconnect}
           />
@@ -310,10 +350,14 @@ function ConnectionTab(props: {
   host: string; setHost: (v: string) => void;
   username: string; setUsername: (v: string) => void;
   password: string; setPassword: (v: string) => void;
+  apiPort: string; setApiPort: (v: string) => void;
   busy: boolean; status: StatusSnapshot;
   onConnect: () => void; onDisconnect: () => void;
 }) {
-  const { host, setHost, username, setUsername, password, setPassword, busy, status } = props;
+  const {
+    host, setHost, username, setUsername, password, setPassword,
+    apiPort, setApiPort, busy, status,
+  } = props;
   const connected = status.state === "civ_ready";
   const connecting = status.state === "connecting";
 
@@ -325,7 +369,7 @@ function ConnectionTab(props: {
       <form className="form" onSubmit={(e) => { e.preventDefault(); if (!connected) props.onConnect(); }}>
         <label>
           <span>Host / IP IC-705</span>
-          <input value={host} onChange={(e) => setHost(e.target.value)} placeholder="192.168.1.200" disabled={connected} />
+          <input value={host} onChange={(e) => setHost(e.target.value)} placeholder={DEFAULT_RADIO_HOST} disabled={connected} />
         </label>
         <label>
           <span>Username</span>
@@ -339,6 +383,19 @@ function ConnectionTab(props: {
           <label><span>Control port</span><input value="50001" disabled /></label>
           <label><span>CI-V port</span><input value="50002" disabled /></label>
         </div>
+        <label>
+          <span>Local API TCP port</span>
+          <input
+            type="number"
+            min={MIN_API_PORT}
+            max="65535"
+            value={apiPort}
+            onChange={(e) => setApiPort(e.target.value)}
+            disabled={connected || busy || connecting}
+            required
+          />
+          <small className="field-help">Loopback 127.0.0.1 · défaut {DEFAULT_API_PORT}</small>
+        </label>
 
         <div className="actions">
           {!connected ? (

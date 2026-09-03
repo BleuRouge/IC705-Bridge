@@ -2,11 +2,12 @@
 
 Client Python **bas niveau** pour [IC705 Bridge](https://github.com/BleuRouge/IC705-Bridge).
 
-IC705 Bridge expose une API HTTP locale (`http://127.0.0.1:8765`) qui remplace le
-port COM virtuel : on lui envoie des trames CI-V brutes et elle renvoie la réponse
-de l'Icom IC-705. Cette librairie est un mince wrapper autour de cette API — elle
-n'interprète pas les commandes CI-V (c'est à l'utilisateur de construire ses
-trames). Aucune dépendance externe (stdlib uniquement).
+IC705 Bridge expose une API HTTP locale (`http://127.0.0.1:8765` par défaut,
+port configurable dans l'app) qui remplace le port COM virtuel : on lui envoie
+des trames CI-V brutes et elle renvoie la réponse de l'Icom IC-705. Cette
+librairie est un mince wrapper autour de cette API — elle n'interprète pas les
+commandes CI-V (c'est à l'utilisateur de construire ses trames). Aucune
+dépendance externe (stdlib uniquement).
 
 ## Installation
 

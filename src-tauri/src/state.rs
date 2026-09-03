@@ -9,8 +9,9 @@ use tokio::sync::Mutex;
 
 use crate::session::{ConnState, Session};
 
-/// Adresse de l'API HTTP locale exposée à Python.
-pub const API_ADDR: &str = "127.0.0.1:8765";
+/// Hôte et port standard de l'API HTTP locale exposée à Python.
+pub const API_HOST: &str = "127.0.0.1";
+pub const DEFAULT_API_PORT: u16 = 8765;
 
 /// Instantané d'état sérialisable (renvoyé aux commandes et à l'API).
 #[derive(Debug, Clone, Serialize)]
@@ -19,6 +20,7 @@ pub struct StatusSnapshot {
     pub message: String,
     pub host: Option<String>,
     pub api_running: bool,
+    pub api_port: u16,
     pub api_url: String,
 }
 
@@ -28,6 +30,7 @@ pub struct StatusInfo {
     pub message: String,
     pub host: Option<String>,
     pub api_running: bool,
+    pub api_port: u16,
 }
 
 impl StatusInfo {
@@ -37,7 +40,8 @@ impl StatusInfo {
             message: self.message.clone(),
             host: self.host.clone(),
             api_running: self.api_running,
-            api_url: format!("http://{API_ADDR}"),
+            api_port: self.api_port,
+            api_url: format!("http://{API_HOST}:{}", self.api_port),
         }
     }
 }
@@ -68,6 +72,7 @@ impl AppState {
                 message: "Déconnecté".into(),
                 host: None,
                 api_running: false,
+                api_port: DEFAULT_API_PORT,
             }),
         }
     }
@@ -102,9 +107,19 @@ impl AppState {
         }
     }
 
-    /// Marque l'API HTTP comme démarrée.
-    pub fn set_api_running(&self, running: bool) {
-        self.status.lock().unwrap().api_running = running;
+    /// Met à jour le port et l'état d'écoute de l'API HTTP locale.
+    pub fn set_api_endpoint(&self, port: u16, running: bool) {
+        let mut status = self.status.lock().unwrap();
+        status.api_port = port;
+        status.api_running = running;
+    }
+
+    /// Marque l'API arrêtée si ce serveur correspond encore au port courant.
+    pub fn set_api_stopped_if_port(&self, port: u16) {
+        let mut status = self.status.lock().unwrap();
+        if status.api_port == port {
+            status.api_running = false;
+        }
     }
 }
 

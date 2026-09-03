@@ -37,6 +37,13 @@ de l'IC-705, puis cliquer sur **Connect**. Laisser ensuite l'application ouverte
 en arrière-plan : le moniteur waterfall se lance automatiquement dès que la
 connexion CI-V est opérationnelle.
 
+Pour la configuration de démonstration, l'app propose déjà l'IP `192.168.59.1`
+et le mot de passe `bouter20XX`. Il ne reste qu'à renseigner le username si
+nécessaire.
+
+Le port TCP local standard est `8765`. Si un autre port est choisi dans l'app,
+passer la même valeur au lanceur avec `--port`.
+
 À la fermeture du moniteur, IC705 Bridge reste ouvert afin de pouvoir utiliser
 **Disconnect** et rendre proprement le contrôle CI-V au poste.
 
@@ -47,6 +54,7 @@ Le lanceur accepte notamment :
 ```bash
 ./demo/run_demo.sh --source              # toujours utiliser pnpm tauri dev
 ./demo/run_demo.sh --no-launch           # l'application est déjà ouverte
+./demo/run_demo.sh --port 9876           # même port que celui choisi dans l'app
 ./demo/run_demo.sh --radio 0xA4 --rows 200
 ```
 

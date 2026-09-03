@@ -12,6 +12,7 @@ export interface StatusSnapshot {
   message: string;
   host: string | null;
   api_running: boolean;
+  api_port: number;
   api_url: string;
 }
 

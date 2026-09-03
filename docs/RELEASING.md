@@ -6,7 +6,7 @@ les publie automatiquement. L'app installée vérifie ensuite les mises à jour 
 démarrage et se met à jour toute seule.
 
 ```
-git tag v0.1.2  →  GitHub Actions  →  Release avec les 3 installeurs + latest.json
+git tag v0.1.3  →  GitHub Actions  →  Release avec les 3 installeurs + latest.json
                                           │
                           app installée ──┘ (vérifie au lancement, télécharge, redémarre)
 ```
@@ -57,13 +57,13 @@ gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD --body ""
    ```
 3. Commit sur `main` :
    ```bash
-   git commit -am "Release v0.1.2"
+   git commit -am "Release v0.1.3"
    git push origin main
    ```
 4. Crée et pousse le tag (préfixe `v`) :
    ```bash
-   git tag v0.1.2
-   git push origin v0.1.2
+   git tag v0.1.3
+   git push origin v0.1.3
    ```
 5. Le workflow [`.github/workflows/release.yml`](../.github/workflows/release.yml)
    construit et publie la Release. Compter ~15-25 min (3 OS en parallèle).

@@ -113,6 +113,7 @@ h2 { margin: 0 0 4px; font-size: 18px; }
 }
 .form input:focus { outline: none; border-color: var(--accent); }
 .form input:disabled { opacity: .6; }
+.field-help { color: var(--muted); font-size: 11px; }
 .ports { display: flex; gap: 14px; }
 .ports label { flex: 1; }
 

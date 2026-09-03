@@ -119,9 +119,10 @@ Fonctions attendues :
 
 ## 3. API locale pour Python
 
-Une fois l’app connectée, elle expose une API locale.
+Une fois l’app lancée, elle expose une API locale. Son port TCP est configurable
+dans l'onglet Connection et mémorisé ; la valeur standard reste `8765`.
 
-Adresse typique :
+Adresse par défaut :
 
 ```txt
 http://127.0.0.1:8765

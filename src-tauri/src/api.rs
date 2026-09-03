@@ -1,4 +1,4 @@
-//! API HTTP locale (127.0.0.1:8765) — passerelle pour les scripts Python.
+//! API HTTP locale (127.0.0.1, port configurable) — passerelle Python.
 //!
 //! Endpoints :
 //! - `GET  /status` → état de la connexion ;
@@ -19,12 +19,127 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use tokio::sync::{oneshot, Mutex};
 use tokio_stream::{wrappers::BroadcastStream, StreamExt};
 
 use crate::commands::CivResult;
 use crate::error::BridgeError;
-use crate::state::{AppState, StatusSnapshot, API_ADDR};
+use crate::state::{AppState, StatusSnapshot, API_HOST, DEFAULT_API_PORT};
 use crate::util::{parse_hex, to_hex};
+
+/// Port minimal retenu pour éviter les ports privilégiés sur macOS/Linux.
+pub const MIN_API_PORT: u16 = 1024;
+
+struct RunningApi {
+    generation: u64,
+    port: u16,
+    shutdown: oneshot::Sender<()>,
+}
+
+#[derive(Default)]
+struct ApiManagerState {
+    generation: u64,
+    current: Option<RunningApi>,
+}
+
+/// Pilote le serveur HTTP et permet un changement de port sans redémarrer l'app.
+#[derive(Default)]
+pub struct ApiServerManager {
+    inner: Mutex<ApiManagerState>,
+}
+
+impl ApiServerManager {
+    /// Démarre le port standard, sauf si l'UI a déjà appliqué un port mémorisé.
+    pub async fn ensure_started(self: &Arc<Self>, state: Arc<AppState>) {
+        if let Err(error) = self.start(state, DEFAULT_API_PORT, true).await {
+            tracing::error!("impossible de démarrer l'API locale : {error}");
+        }
+    }
+
+    /// Bascule l'API vers `port`. L'ancien serveur n'est arrêté qu'une fois le
+    /// nouveau port réservé avec succès.
+    pub async fn set_port(
+        self: &Arc<Self>,
+        state: Arc<AppState>,
+        port: u16,
+    ) -> std::result::Result<(), BridgeError> {
+        validate_api_port(port)?;
+        self.start(state, port, false).await
+    }
+
+    async fn start(
+        self: &Arc<Self>,
+        state: Arc<AppState>,
+        port: u16,
+        only_if_absent: bool,
+    ) -> std::result::Result<(), BridgeError> {
+        let mut manager = self.inner.lock().await;
+        if only_if_absent && manager.current.is_some() {
+            return Ok(());
+        }
+        if manager.current.as_ref().is_some_and(|api| api.port == port) {
+            return Ok(());
+        }
+
+        let listener = tokio::net::TcpListener::bind((API_HOST, port))
+            .await
+            .map_err(|error| {
+                BridgeError::Protocol(format!(
+                    "port API local {port} indisponible sur {API_HOST} : {error}"
+                ))
+            })?;
+        let app = router(state.clone());
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        manager.generation = manager.generation.wrapping_add(1);
+        let generation = manager.generation;
+        let previous = manager.current.replace(RunningApi {
+            generation,
+            port,
+            shutdown: shutdown_tx,
+        });
+        state.set_api_endpoint(port, true);
+
+        let api_manager = Arc::downgrade(self);
+        tokio::spawn(async move {
+            tracing::info!("API locale démarrée sur http://{API_HOST}:{port}");
+            let result = axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await;
+            if let Err(error) = result {
+                tracing::error!("API locale arrêtée sur le port {port} : {error}");
+            }
+
+            if let Some(api_manager) = api_manager.upgrade() {
+                let mut manager = api_manager.inner.lock().await;
+                if manager
+                    .current
+                    .as_ref()
+                    .is_some_and(|api| api.generation == generation)
+                {
+                    manager.current = None;
+                    state.set_api_stopped_if_port(port);
+                }
+            }
+        });
+
+        drop(manager);
+        if let Some(previous) = previous {
+            let _ = previous.shutdown.send(());
+        }
+        Ok(())
+    }
+}
+
+fn validate_api_port(port: u16) -> std::result::Result<(), BridgeError> {
+    if port < MIN_API_PORT {
+        return Err(BridgeError::Protocol(format!(
+            "le port API doit être compris entre {MIN_API_PORT} et 65535"
+        )));
+    }
+    Ok(())
+}
 
 #[derive(Deserialize)]
 struct CivRequest {
@@ -52,8 +167,14 @@ fn bridge_err(e: BridgeError) -> (StatusCode, Json<ApiError>) {
     err(code, e.to_string())
 }
 
-/// Hôtes acceptés dans l'en-tête `Host` (doivent correspondre à [`API_ADDR`]).
-const ALLOWED_HOSTS: [&str; 2] = ["127.0.0.1:8765", "localhost:8765"];
+fn is_allowed_local_host(host: &str) -> bool {
+    for prefix in ["127.0.0.1:", "localhost:"] {
+        if let Some(port) = host.strip_prefix(prefix) {
+            return port.parse::<u16>().is_ok_and(|port| port != 0);
+        }
+    }
+    matches!(host, "127.0.0.1" | "localhost")
+}
 
 /// En-tête réclamé sur les endpoints sensibles. Une page web ne peut pas
 /// l'ajouter en cross-origin sans déclencher un préflight (que l'absence de
@@ -70,7 +191,7 @@ async fn guard_local_host(req: Request, next: Next) -> Response {
         .headers()
         .get(header::HOST)
         .and_then(|h| h.to_str().ok())
-        .is_some_and(|h| ALLOWED_HOSTS.contains(&h));
+        .is_some_and(is_allowed_local_host);
     if !allowed {
         return err(StatusCode::FORBIDDEN, "hôte non autorisé").into_response();
     }
@@ -164,25 +285,6 @@ fn router(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
-/// Démarre le serveur HTTP local. Boucle jusqu'à l'arrêt de l'application.
-pub async fn serve(state: Arc<AppState>) {
-    let app = router(state.clone());
-
-    match tokio::net::TcpListener::bind(API_ADDR).await {
-        Ok(listener) => {
-            state.set_api_running(true);
-            tracing::info!("API locale démarrée sur http://{API_ADDR}");
-            if let Err(e) = axum::serve(listener, app).await {
-                tracing::error!("API locale arrêtée : {e}");
-                state.set_api_running(false);
-            }
-        }
-        Err(e) => {
-            tracing::error!("impossible de démarrer l'API locale sur {API_ADDR} : {e}");
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,7 +314,7 @@ mod tests {
     async fn allows_status_on_localhost_without_header() {
         let req = Request::builder()
             .uri("/status")
-            .header(header::HOST, API_ADDR)
+            .header(header::HOST, format!("{API_HOST}:{DEFAULT_API_PORT}"))
             .body(Body::empty())
             .unwrap();
         assert_eq!(status_of(req).await, StatusCode::OK);
@@ -223,7 +325,7 @@ mod tests {
         let req = Request::builder()
             .method("POST")
             .uri("/civ")
-            .header(header::HOST, API_ADDR)
+            .header(header::HOST, format!("{API_HOST}:{DEFAULT_API_PORT}"))
             .header("content-type", "application/json")
             .body(Body::from(r#"{"frame":"FE FE A4 E0 03 FD"}"#))
             .unwrap();
@@ -249,7 +351,7 @@ mod tests {
     async fn rejects_stream_without_auth_header() {
         let req = Request::builder()
             .uri("/stream")
-            .header(header::HOST, API_ADDR)
+            .header(header::HOST, format!("{API_HOST}:{DEFAULT_API_PORT}"))
             .body(Body::empty())
             .unwrap();
         assert_eq!(status_of(req).await, StatusCode::FORBIDDEN);
@@ -259,5 +361,65 @@ mod tests {
     fn civ_timeout_maps_to_gateway_timeout() {
         let (status, _) = bridge_err(BridgeError::Timeout("réponse CI-V".into()));
         assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
+    }
+
+    #[test]
+    fn accepts_configurable_loopback_ports_only() {
+        assert!(is_allowed_local_host("127.0.0.1:19001"));
+        assert!(is_allowed_local_host("localhost:65535"));
+        assert!(!is_allowed_local_host("localhost.example:8765"));
+        assert!(!is_allowed_local_host("127.0.0.1:not-a-port"));
+    }
+
+    #[test]
+    fn rejects_privileged_api_ports() {
+        assert!(validate_api_port(MIN_API_PORT).is_ok());
+        assert!(validate_api_port(MIN_API_PORT - 1).is_err());
+    }
+
+    fn available_port() -> u16 {
+        std::net::TcpListener::bind((API_HOST, 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+
+    #[tokio::test]
+    async fn switches_api_port_without_restarting_the_app() {
+        let state = Arc::new(AppState::new());
+        let manager = Arc::new(ApiServerManager::default());
+        let first = available_port();
+        let mut second = available_port();
+        while second == first {
+            second = available_port();
+        }
+
+        manager.set_port(state.clone(), first).await.unwrap();
+        assert_eq!(state.snapshot().api_port, first);
+        assert!(tokio::net::TcpStream::connect((API_HOST, first))
+            .await
+            .is_ok());
+
+        manager.set_port(state.clone(), second).await.unwrap();
+        assert_eq!(state.snapshot().api_port, second);
+        assert!(state.snapshot().api_running);
+        assert!(tokio::net::TcpStream::connect((API_HOST, second))
+            .await
+            .is_ok());
+
+        let old_port_closed = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if tokio::net::TcpStream::connect((API_HOST, first))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        assert!(old_port_closed.is_ok());
     }
 }

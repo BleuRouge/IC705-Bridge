@@ -29,7 +29,7 @@ Backend Rust (Tauri v2)
         ├── cœur réseau RS-BA1 (tokio)
         │     ├── stream control (UDP 50001) : login, auth, négociation
         │     └── stream serial  (UDP 50002) : trames CI-V (TX/RX)
-        └── API HTTP locale (axum, 127.0.0.1:8765) ──► lib Python
+        └── API HTTP locale (axum, 127.0.0.1:8765 par défaut) ──► lib Python
                                                           │
                                               IC-705 (Wi-Fi RS-BA1)
 ```
@@ -97,10 +97,14 @@ fin de test, y compris en cas d'erreur.
 
 1. Lancer l'application.
 2. Onglet **Connection** : saisir l'IP, le username et le password RS-BA1 de
-   l'IC-705, puis **Connect**. Les ports sont fixes (control 50001, CI-V 50002).
+   l'IC-705, choisir au besoin le port TCP de l'API locale, puis **Connect**.
+   Les ports radio restent fixes (control 50001, CI-V 50002).
+   Au premier lancement, l'IP et le mot de passe proposés sont respectivement
+   `192.168.59.1` et `bouter20XX` (le mot de passe n'est jamais mémorisé).
 3. Onglet **CI-V Terminal** : saisir une trame hex et **Send** ; les réponses
    s'affichent horodatées.
-4. **API locale** : une fois connecté, l'API tourne sur `http://127.0.0.1:8765`.
+4. **API locale** : elle écoute sur `http://127.0.0.1:8765` par défaut. Le port
+   peut être modifié dans l'onglet Connection et le choix est mémorisé.
 
 ### API HTTP locale
 
@@ -131,7 +135,8 @@ moniteur waterfall existant :
 ```
 
 Sous Windows, utiliser `.\demo\run_demo.ps1` dans PowerShell. Les prérequis et
-options sont détaillés dans [`demo/README.md`](demo/README.md).
+options sont détaillés dans [`demo/README.md`](demo/README.md). Pour un port API
+personnalisé, lancer par exemple `./demo/run_demo.sh --port 9876`.
 
 ### Librairie Python
 

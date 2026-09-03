@@ -30,6 +30,11 @@ class LauncherTests(unittest.TestCase):
         with self.assertRaises(launcher.argparse.ArgumentTypeError):
             launcher.parse_radio_address("0x100")
 
+    def test_api_port_uses_non_privileged_range(self) -> None:
+        self.assertEqual(launcher.parse_api_port("8765"), 8765)
+        with self.assertRaises(launcher.argparse.ArgumentTypeError):
+            launcher.parse_api_port("80")
+
     @patch.object(launcher.shutil, "which", return_value=None)
     def test_source_launch_requires_pnpm(self, _which: object) -> None:
         with self.assertRaisesRegex(RuntimeError, "pnpm est introuvable"):

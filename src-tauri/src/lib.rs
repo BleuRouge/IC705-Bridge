@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use tauri::Manager;
 
+use api::ApiServerManager;
 use state::AppState;
 
 /// Délai max accordé à la déconnexion propre lors de la fermeture de l'app.
@@ -32,12 +33,13 @@ pub fn run() {
         .init();
 
     let app_state = Arc::new(AppState::new());
+    let api_server = Arc::new(ApiServerManager::default());
 
     let builder = tauri::Builder::default();
 
     // Garrot mono-instance (doit être enregistré en premier) : un second
     // lancement refocalise la fenêtre existante au lieu de démarrer un processus
-    // concurrent qui échouerait à binder les ports UDP 50001/50002 et l'API 8765.
+    // concurrent qui échouerait à binder les ports UDP 50001/50002 et l'API locale.
     #[cfg(desktop)]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
         if let Some(window) = app.get_webview_window("main") {
@@ -50,6 +52,7 @@ pub fn run() {
     let app = builder
         .plugin(tauri_plugin_process::init())
         .manage(app_state.clone())
+        .manage(api_server.clone())
         .setup(move |app| {
             // Mises à jour automatiques (desktop uniquement).
             #[cfg(desktop)]
@@ -58,8 +61,9 @@ pub fn run() {
 
             // Démarrage de l'API HTTP locale (toujours active).
             let st = app_state.clone();
+            let server = api_server.clone();
             tauri::async_runtime::spawn(async move {
-                api::serve(st).await;
+                server.ensure_started(st).await;
             });
             Ok(())
         })
@@ -68,6 +72,7 @@ pub fn run() {
             commands::disconnect,
             commands::send_civ,
             commands::get_status,
+            commands::set_api_port,
         ])
         .build(tauri::generate_context!())
         .expect("erreur à la construction de l'application Tauri");

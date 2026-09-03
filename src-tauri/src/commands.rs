@@ -5,6 +5,7 @@ use std::sync::Arc;
 use serde::Serialize;
 use tauri::{AppHandle, State};
 
+use crate::api::ApiServerManager;
 use crate::error::{BridgeError, Result};
 use crate::session::{ConnState, Session};
 use crate::state::{AppState, StatusSnapshot};
@@ -145,4 +146,16 @@ pub async fn send_civ(state: State<'_, Arc<AppState>>, frame: String) -> Result<
 #[tauri::command]
 pub fn get_status(state: State<'_, Arc<AppState>>) -> StatusSnapshot {
     state.snapshot()
+}
+
+/// Change le port TCP de l'API loopback sans redémarrer l'application.
+#[tauri::command]
+pub async fn set_api_port(
+    state: State<'_, Arc<AppState>>,
+    api_server: State<'_, Arc<ApiServerManager>>,
+    port: u16,
+) -> Result<StatusSnapshot> {
+    let state = state.inner().clone();
+    api_server.inner().set_port(state.clone(), port).await?;
+    Ok(state.snapshot())
 }
