@@ -1,10 +1,9 @@
 # Protocole réseau RS-BA1 (IC-705) — spec d'implémentation canonique
 
-> **Statut : source de vérité unique** pour le transport réseau RadioForge.
+> **Statut : source de vérité unique** pour le transport réseau IC705 Bridge.
 > Ce document consolide et remplace les anciennes notes réseau
 > (`ic705-network-protocol.md`, `ic705-network-protocol-analysis.md`, supprimés).
-> Il décrit le protocole **et** l'état de l'implémentation, avec la liste des
-> écarts à corriger (§12) et le plan du module `rsba1/` propre (§13).
+> Il décrit le protocole **et** l'état actuel de l'implémentation (§12-13).
 
 Spec dérivée par **rétro-ingénierie d'interopérabilité** de deux implémentations
 indépendantes (aucun code copié) :
@@ -16,7 +15,7 @@ indépendantes (aucun code copié) :
 
 Croiser les deux est précieux : là où l'un est cryptique, l'autre clarifie, et
 les **divergences** révèlent ce qui est toléré vs strict côté radio. Le code
-RadioForge **réimplémente** d'après cette compréhension ; les valeurs marquées
+IC705 Bridge **réimplémente** d'après cette compréhension ; les valeurs marquées
 « à confirmer » doivent être validées sur capture / IC-705 réel.
 
 ---
@@ -33,7 +32,7 @@ L'IC-705 expose le protocole RS-BA1 sur **3 ports UDP indépendants** :
 |-------|----------------|---------|-----------------------------------------|
 | 50001 | control        | **oui** (passcode) | handshake, login, token, autorise les autres flux |
 | 50002 | serial / CI-V  | non     | trames CI-V `FE FE … FD` (TX/RX)        |
-| 50003 | audio          | non     | audio (hors périmètre RadioForge)       |
+| 50003 | audio          | non     | audio (hors périmètre IC705 Bridge)     |
 
 Chaque stream est une **session UDP indépendante** : socket dédié, handshake
 propre, `localSID`/`remoteSID` propres, compteurs `seq` propres, boucles
@@ -53,9 +52,8 @@ serial/audio sont **autorisés par le control** via le paquet conninfo `0x90`.
 | 12     | 4      | remoteSID    | BE u32 | "rcvd id" (session radio)                    |
 
 `localSID` : kappanhang/wfview le **dérivent de l'IP+port locaux**
-(`(ip>>8&0xff)<<24 | (ip&0xff)<<16 | (localPort&0xffff)`). RadioForge utilise un
-aléatoire u32 → **toléré** (la radio ne fait que le renvoyer en `remoteSID`).
-Recalculé pour chaque socket. La radio confirme `remoteSID` à l'ouverture
+(`(ip>>8&0xff)<<24 | (ip&0xff)<<16 | (localPort&0xffff)`). IC705 Bridge suit ce
+calcul à partir de l'adresse locale de chaque socket. La radio confirme `remoteSID` à l'ouverture
 serial+audio (reply 0x90 : `remoteSID = r[8:12]`, `localSID = r[12:16]`).
 
 ---
@@ -124,11 +122,8 @@ notes confondaient ; **vérifié dans kappanhang `pkt0.go` / `pkt7.go`** :
 | **pkt7 `innerSendSeq`** | 0x8304 | nouvelle requête ping | champ replyID interne |
 | **serial `sendseq`** (data, bytes 19-20, **BE**) | 0 | open + chaque data | ordre des données CI-V |
 
-> 🔴 **Le code actuel (`StreamSender.seq`) utilise UN SEUL compteur partagé** pour
-> idle + ping + data. Conséquence : chaque ping (type 0x07) consomme un numéro
-> dans la séquence pkt0 suivie par la radio pour la retransmission → la radio voit
-> des « trous » et **fige la livraison CI-V après le 1er échange**. Suspect n°1 du
-> blocage. **Fix : compteur pkt7 séparé** (voir §12-A).
+IC705 Bridge maintient ces compteurs séparément dans `StreamCommon` : les pings
+ne créent donc aucun trou artificiel dans la séquence pkt0.
 
 `sendTrackedPacket` : pose `seq` (LE) dans bytes 6-7 **avant** envoi, stocke le
 paquet dans `txSeqBuf` (clé = seq), puis `sendSeq++`. Départ du compteur : wfview
@@ -147,8 +142,8 @@ Détection idle : `len==16 && r[4:6]==00 00`.
 Intervalle : **100 ms**, **réarmé** à chaque paquet *tracked* envoyé (évite des
 idles superflus qui gonflent le seq). En vrai idle, kappanhang relâche à ~1 s.
 
-> 🟠 Le code actuel envoie l'idle à 100 ms fixe **sans reset** → seq gonflé
-> (aggrave §5). Fix : réarmer le timer idle après chaque paquet suivi (§12-C).
+IC705 Bridge réarme le timer après chaque paquet suivi, puis passe d'une cadence
+active de 100 ms à une cadence de repos de 1 s.
 
 ### 6.2 La radio nous réclame une retransmission (type 0x01) — *côté TX*
 
@@ -158,7 +153,7 @@ Deux formats :
 
 Réponse : renvoyer le paquet depuis `txSeqBuf` (×2) ; **si absent → envoyer un
 IDLE estampillé avec ce seq** pour combler le trou (sinon la radio attend ce seq
-pour toujours et **bloque tout le CI-V**). ✅ RadioForge fait déjà ce gap-fill.
+pour toujours et **bloque tout le CI-V**). ✅ IC705 Bridge effectue ce gap-fill.
 
 ### 6.3 NOUS réclamons une retransmission (`rxSeqBuf`) — *côté RX*
 
@@ -169,9 +164,8 @@ On suit le seq des paquets **reçus** (idle + data, type 0x00, seq≠0). Sur tro
 - **kappanhang** : `rxSeqBuf` avec **délai de réordonnancement 100 ms** + cap
   `maxRetransmitRequestPacketCount = 10`.
 
-> 🟠 Le code actuel (`track_rx`) redemande **immédiatement** à chaque trou (cap
-> diff ≤ 11), sans batch ni délai → **tempête ~150 paquets/s**. Fix : refaire
-> façon wfview (collecte + timer 100 ms + max 4 + flush > 50) (§12-B).
+IC705 Bridge suit l'approche wfview : collecte, timer 100 ms, quatre essais au
+maximum et abandon lorsque plus de 50 séquences manquent.
 
 ---
 
@@ -186,7 +180,7 @@ Après handshake : `pkt0.init` (sendSeq=1), puis :
    <32 octets 0x00>
    [passcode(username) 16o @64]
    [passcode(password) 16o @80]
-   [connection_name ASCII @96, ex. "RadioForge\0"]
+   [connection_name ASCII @96, ex. "icom-pc\0"]
    <reste 0x00>
    ```
    `authStartID` = 2 octets aléatoires ; `innerSeq` (authInnerSendSeq) incrémenté.
@@ -220,9 +214,8 @@ magic : `0x02` = 1er token, `0x05` = renew / réauth (60 s), `0x01` = deauth.
    ```
 6. Réponse `0x90` (len 144) avec `r[96]==1` → **succès serial+audio**.
 
-> 🟡 RadioForge n'envoie aujourd'hui que `username + a8replyID` dans le `0x90`
-> (champs ports/codecs à zéro). wfview met `civport`/`audioport`/`commoncap` →
-> **piste pour le `0xa8`/`0x90` intermittent** (§12-D).
+IC705 Bridge envoie le `a8replyID`, le username, les ports serial/audio et les
+paramètres de codec/tampon attendus par la radio.
 
 **Réponses control utiles** (boucle de lecture) :
 - len 64 `40..` : auth ok ; `r[21]==0x05` → `authOk` → demander serial+audio.
@@ -252,7 +245,7 @@ c0 01 00 [sendseqHi sendseqLo] [magic]
 - envoyer l'open dès le ready, puis le **renvoyer toutes les 100 ms** ;
 - **stopper dès la 1re trame CI-V data reçue** ;
 - **watchdog** : si aucune trame CI-V pendant **2 s**, relancer le renvoi.
-- ✅ RadioForge fait déjà ce re-send + watchdog (`maybe_resend_open`).
+- ✅ IC705 Bridge effectue ce re-send dans `spawn_open_keeper` avec son watchdog.
 
 **Envoi CI-V** (`send`, len 21+l) via `sendTrackedPacket` :
 ```
@@ -263,12 +256,14 @@ c1 [l] 00 [sendseqHi sendseqLo] [trame CI-V…]
 bytes 19-20 = sendseq serial (BE). Trame CI-V à l'offset 21.
 
 **Réception CI-V** : paquet data si `len>21 && r[16]==0xc1`. Longueur trame =
-`r[17]`, trame = `r[21:21+r[17]]`, seq de transport = `r[6:8]` (LE).
+`u16::from_le_bytes(r[17:19])`, trame à partir de `r[21]`, seq de transport =
+`r[6:8]` (LE).
 La radio renvoie l'**écho** de notre trame (to/from inversés) **puis** la vraie
-réponse ; le codec existant (`validate_response`) distingue déjà les deux.
+réponse ; `Session::send_civ` écarte l'écho et corrèle la réponse attendue.
 
-✅ Tunnel CI-V bidirectionnel **obtenu sur IC-705 réel** (1er échange), mais
-**instable** ensuite (cf. §12).
+✅ Tunnel CI-V bidirectionnel obtenu sur IC-705 réel. Les corrections de
+fiabilité décrites au §12 doivent être revalidées avec le smoke test à chaque
+release destinée à une démonstration.
 
 ---
 
@@ -309,86 +304,64 @@ e i2→55, r i3→5C). Reproduit dans le code + testé unitairement. ✅ validé
 
 ## 11. Tableau de corrélation (divergences qui comptent)
 
-| Brique | wfview | kappanhang | RadioForge (actuel) | Verdict |
+| Brique | wfview | kappanhang | IC705 Bridge | État |
 |---|---|---|---|---|
-| Compteur seq pkt7 | propre | **propre** (control 2 / serial 1) | **partagé avec pkt0** ❌ | **CAUSE probable du fige CI-V** (§12-A) |
-| Retransmit RX | batch 100 ms, max 4, flush 50 | rxSeqBuf délai 100 ms, cap 10 | **immédiat par trou** ❌ | **CAUSE de la tempête** (§12-B) |
-| Idle reset | oui (100 ms réarmé) | oui | **non** ❌ | gonfle le seq (§12-C) |
-| Conninfo `0x90` | civport+audioport+codecs+user | user + replyid | **user + replyid** | piste `0x90` intermittent (§12-D) |
-| Open re-send | **boucle 100 ms + watchdog 2 s** | 1 seule fois | **boucle + watchdog** ✅ | OK |
-| Open magic (byte 21) | 0x04 | 0x05 | 0x05 | tester 0x04 si besoin |
-| Ping | 500 ms | 3 s | 3 s | OK |
-| Gap-fill TX (idle au seq réclamé) | oui | oui | **oui** ✅ | OK |
-| localSID | dérivé IP+port | dérivé IP+port | aléatoire | toléré ✅ |
-| Login passcode | oui | oui | **oui** ✅ | OK (validé radio) |
-| Handshake | oui | oui | **oui** ✅ | OK (validé radio) |
+| Compteur seq pkt7 | propre | **propre** (control 2 / serial 1) | propre, séparé de pkt0 | ✅ |
+| Retransmit RX | batch 100 ms, max 4, flush 50 | délai 100 ms, cap 10 | batch 100 ms, max 4, flush 50 | ✅ |
+| Idle reset | oui | oui | 100 ms actif, 1 s au repos, timer réarmé | ✅ |
+| Conninfo `0x90` | ports+codecs+user | user + replyid | replyid+user+ports+codecs | ✅ |
+| Open re-send | boucle 100 ms + watchdog 2 s | 1 seule fois | boucle 100 ms + watchdog 2 s | ✅ |
+| Open magic (byte 21) | 0x04 | 0x05 | 0x05 | validé par l'implémentation retenue |
+| Ping | 500 ms | 3 s | 3 s | ✅ |
+| Gap-fill TX | oui | oui | oui | ✅ |
+| localSID | dérivé IP+port | dérivé IP+port | dérivé IP+port | ✅ |
+| Login passcode | oui | oui | oui | ✅ |
+| Handshake | oui | oui | oui | ✅ |
 
 ---
 
-## 12. Écarts à corriger (fix-list, par priorité)
+## 12. État de fiabilisation et limites restantes
 
-> Symptômes IC-705 réel : control fiable ✅ ; `0x90` intermittent ; CI-V → le
-> **1er paquet data après l'open répond, les suivants non**, avec **tempête ~150 pkt/s**.
+Les anomalies initialement observées sur IC-705 réel (compteur pkt7 partagé,
+tempête de retransmissions et idle non réarmé) sont corrigées dans
+`rsba1/stream.rs`. La fermeture normale, Cmd+Q et l'installation d'une mise à
+jour envoient aussi le deauth/disconnect afin de ne pas laisser la radio occupée.
 
-- **A 🔴 Compteur pkt7 séparé.** Donner au ping son propre `sendSeq` (control 2 /
-  serial 1) + `innerSendSeq` (init 0x8304), distinct du `sendSeq` pkt0. Ne PAS
-  passer le ping par `sendTrackedPacket`. → cible directe du fige CI-V.
-- **B 🟠 Retransmit RX groupé.** Remplacer le redemande-immédiat de `track_rx` :
-  collecter les seq manquants, timer 100 ms, max 4 essais/seq, flush si > 50.
-- **C 🟠 Idle reset.** Réarmer le timer idle après chaque paquet suivi.
-- **D 🟡 Conninfo enrichi.** Ajouter civport/audioport locaux + `commoncap` lu
-  dans le `0xa8`, comme wfview, si le `0xa8`/`0x90` reste intermittent.
-- **E 🟡 Détails layout.** Aligner replyID/innerSeq du ping (§4) et innerSeq du
-  login (§7) sur la spec.
-- **F ✅ Scope réseau (fait).** `set_scope_streaming` est câblé sur le transport
-  réseau : un flag `streaming` partagé (`SerialChannel` ↔ `RsBa1Session`) pilote le
-  worker serial, qui draine les trames `27 00`, les réassemble via le
-  `ScopeAssembler` mutualisé de `protocols/civ/scope.rs`, et émet les events
-  `scope-frame` (même pipeline que l'USB). `27 11` data-output est envoyé par la
-  commande `ic705_set_scope_streaming`.
-  - 🔴 **Bug corrigé (capture IC-705 réelle)** : la longueur CI-V du paquet data
-    `0xc1` est un champ **2 octets little-endian** (bytes 17-18), pas 1 seul.
-    `extract_civ_payload` ne lisait que `bytes[17]` → toute trame ≥ 256 o était
-    tronquée à `len & 0xFF` (le waveform `27 00` de ~497 o arrivait coupé à 241 o,
-    sans `FD` final → jamais parsé en scope, ré-émis en CI-V). Corrigé.
-  - 📐 **Format scope RS-BA1 ≠ USB** : en réseau, l'IC-705 envoie **tout le sweep
-    dans UNE trame `27 00` (total=01)** — en-tête info de 16 o
-    (`sub, scope_id, seq, total, mode, center/edge 5B, span/edge 5B, oor`) suivi
-    directement de ~475 échantillons — au lieu des 11 parties de l'USB.
-    `try_parse_scope_waveform` extrait les échantillons après l'en-tête et
-    `ScopeAssembler` émet le sweep directement quand `total ≤ 1`.
+La couche requête/réponse CI-V :
+
+- sérialise les transactions provenant du terminal et de l'API ;
+- écarte l'écho et les trames spontanées dont l'adresse, la commande ou la
+  sous-commande connue diffère ;
+- accepte les acquittements `FB`/`FA` ;
+- renvoie un timeout explicite si aucune réponse corrélée n'arrive sous 1,2 s.
+
+Limites connues :
+
+- les paquets serial retransmis sont dédupliqués mais pas remis en ordre strict ;
+- la corrélation porte sur les adresses, la commande et les sous-commandes
+  connues, le protocole CI-V ne fournissant pas d'identifiant de transaction ;
+- le format du scope `27 00` doit rester couvert par un essai matériel. Le
+  transport lit correctement sa longueur sur deux octets et diffuse la trame
+  complète vers le frontend et `/stream`. `python/monitor.py` effectue ensuite
+  l'interprétation du sweep.
 
 ---
 
-## 13. Plan du module `rsba1/` (réécriture propre)
-
-Objectif : sortir le protocole RS-BA1 de `transports/network.rs` (1500 l.
-monolithiques) vers un module dédié, testable couche par couche, sur lequel le
-transport réseau s'appuie. **Réseau d'abord** : on fait marcher l'IC-705, puis on
-généralise multi-radio (le champ modèle `"IC-705"` du `0x90` devient un paramètre).
+## 13. Architecture actuelle du module `rsba1/`
 
 ```
 src-tauri/src/rsba1/
-├── mod.rs            # API publique : RsBa1Session (connect/disconnect/civ_io), re-exports
-├── header.rs         # en-tête 16 o : encode/parse, types de paquet (§1)
-├── passcode.rs       # table SEQUENCE + passcode() (§9) — déjà référencé
-├── packets.rs        # builders/parsers purs : pkt3/4/6/7, login, auth, 0x90, open, data (§3-8)
-├── seq.rs            # Pkt0Seq (txSeqBuf, gap-fill) + Pkt7Seq (ping) SÉPARÉS (§5-6)
-├── reliability.rs    # rxSeqBuf : collecte trous + retransmit groupé 100 ms (§6.3)
-├── control.rs        # flux 50001 : handshake → login → token → 0xa8 → 0x90 (§7)
-├── serial.rs         # flux 50002 : handshake → open(+resend/watchdog) → tunnel CI-V (§8)
-└── session.rs        # orchestration des deux flux + boucles keepalive (owner-thread)
+├── mod.rs       # déclaration des sous-modules
+├── passcode.rs  # table SEQUENCE + encodage username/password
+├── stream.rs    # socket commun, handshake, séquences, keepalives, retransmissions
+├── control.rs   # port 50001 : login, token, 0xa8 et conninfo 0x90
+└── serial.rs    # port 50002 : open/watchdog et encapsulation CI-V
 ```
 
-Le transport `transports/network.rs` devient une **fine couche d'adaptation** :
-implémente `CivLink` en déléguant à `rsba1::RsBa1Session`, expose
-`write_and_read_civ_response` / `set_scope_streaming`. Tout le reste de l'app
-(commandes, codec CI-V, scope) est réutilisé inchangé.
-
-**Stratégie de validation** : chaque couche (`header`, `packets`, `passcode`,
-`seq`, `reliability`) garde ses tests de layout déterministes (déjà ~70
-aujourd'hui) ; l'intégration vivante (`control`/`serial`/`session`) est validée
-sur IC-705 réel via l'event `network-log` (déjà en place).
+`src-tauri/src/session.rs` orchestre les deux streams, corrèle les réponses et
+diffuse les trames vers Tauri et l'API. Les tests Rust couvrent les fonctions
+pures ainsi qu'une session complète sur radio UDP simulée. Le smoke test
+`scripts/verify_demo.py --live` complète cette couverture sur matériel réel.
 
 ---
 
@@ -396,7 +369,7 @@ sur IC-705 réel via l'event `network-log` (déjà en place).
 
 Protocole propriétaire non publié, compris par **rétro-ingénierie
 d'interopérabilité** (usage radioamateur). wfview = GPLv3, kappanhang = GPL :
-**aucun code copié** dans RadioForge. La table `SEQUENCE`, l'algorithme
+**aucun code copié** dans IC705 Bridge. La table `SEQUENCE`, l'algorithme
 `passcode` et les layouts sont des données/algorithmes d'interopérabilité,
 réimplémentés en Rust. À assumer comme usage personnel.
 

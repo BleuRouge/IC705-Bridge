@@ -23,7 +23,7 @@ from ic705bridge import IC705Bridge, split_frames
 
 rig = IC705Bridge()
 rep = rig.send_civ("FE FE A4 E0 03 FD")
-for f in split_frames(rep["response"]):   # sépare écho + réponse radio
+for f in split_frames(rep["response"]):   # découpe les réponses concaténées
     print(f)
 ```
 

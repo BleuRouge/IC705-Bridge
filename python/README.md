@@ -33,7 +33,7 @@ print(rig.status())                 # STATUS
 rep = rig.send_civ("FE FE A4 E0 03 FD")   # lecture fréquence (RX)
 print("TX:", rep["tx"])
 print("RX:", rep["response"])
-for f in split_frames(rep["response"]):    # sépare écho + réponse radio
+for f in split_frames(rep["response"]):    # découpe les réponses concaténées
     print(f)
 
 for frame in rig.stream_civ():      # flux CI-V temps réel (générateur bloquant)

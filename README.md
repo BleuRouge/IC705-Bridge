@@ -77,12 +77,19 @@ pnpm tauri dev      # lance l'app (frontend + backend) en mode dev
 pnpm tauri build    # build de production
 ```
 
-Tests / vérifications :
+Validation automatique avant une démo (l'application doit être fermée) :
 
 ```bash
-cd src-tauri && cargo test     # tests Rust (passcode, parsing hex)
-pnpm build                     # type-check + build frontend
+python3 scripts/verify_demo.py          # tests, lint et build Tauri intégré
+python3 scripts/verify_demo.py --quick  # même contrôle sans le build Tauri final
 ```
+
+Test non destructif avec la radio réelle : lancer l'application, se connecter
+à l'IC-705, puis exécuter `python3 scripts/verify_demo.py --live`. Ce mode teste
+`/status`, `/civ` et `/stream` avec des lectures uniquement ; il ne change aucun
+réglage et n'active jamais le PTT. Pour couvrir aussi le waterfall, afficher le
+scope sur la radio et ajouter `--scope` ; sa sortie de données est désactivée en
+fin de test, y compris en cas d'erreur.
 
 ---
 
@@ -113,6 +120,19 @@ Un moniteur d'exemple ([`python/monitor.py`](python/monitor.py)) consomme
 `/stream` pour afficher un **waterfall** du scope + les paramètres de la radio
 (`pip install matplotlib numpy`).
 
+### Démo en une commande
+
+Le lanceur [`demo/`](demo/) crée automatiquement un environnement isolé avec
+`uv`, démarre IC705 Bridge, attend la connexion à la radio, puis ouvre le
+moniteur waterfall existant :
+
+```bash
+./demo/run_demo.sh
+```
+
+Sous Windows, utiliser `.\demo\run_demo.ps1` dans PowerShell. Les prérequis et
+options sont détaillés dans [`demo/README.md`](demo/README.md).
+
 ### Librairie Python
 
 Paquet installable depuis PyPI (`pip install ic705bridge`) ou depuis les sources
@@ -128,7 +148,7 @@ print(rig.status())
 rep = rig.send_civ("FE FE A4 E0 03 FD")
 print("TX:", rep["tx"])
 print("RX:", rep["response"])
-for f in split_frames(rep["response"]):    # sépare écho + réponse radio
+for f in split_frames(rep["response"]):    # découpe les réponses concaténées
     print(f)
 
 for frame in rig.stream_civ():      # flux CI-V temps réel (générateur)
@@ -149,6 +169,8 @@ STATUS/RX/TX dans [`python/COMMANDS.md`](python/COMMANDS.md), démo dans
 - [x] API HTTP locale (`/status`, `/civ`, `/stream` SSE) + garde locale (Host + en-tête)
 - [x] Librairie Python packagée pip/uv (STATUS/RX/TX, `stream_civ()`, catalogue, tests)
 - [x] Publication PyPI de la lib (workflow Trusted Publishing sur tag `py-v*`)
-- [ ] Test contre un IC-705 réel
-- [ ] Corrélation réponse↔commande CI-V + erreur explicite au timeout
-- [ ] Retransmission RX / réordonnancement des paquets serial
+- [x] Corrélation adresse/commande, sérialisation des requêtes et timeout explicite
+- [x] Retransmission RX groupée et déduplication des paquets serial
+- [x] Smoke test réel non destructif (`scripts/verify_demo.py --live`)
+- [ ] Validation end-to-end de chaque release contre un IC-705 réel
+- [ ] Réordonnancement strict des paquets serial retransmis

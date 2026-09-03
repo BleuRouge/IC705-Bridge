@@ -5,6 +5,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import ic705bridge as m
 from ic705bridge import AUTH_HEADER, BridgeError, IC705Bridge, split_frames, to_hex
+from smoke_test import bcd_le, response_frame
 
 seen_headers = {}
 
@@ -140,6 +141,16 @@ class BridgeTests(unittest.TestCase):
 
     def test_version(self):
         self.assertEqual(m.__version__, "0.1.1")
+
+    # -- smoke test réel (parsers testables sans radio) -----------------
+    def test_smoke_response_parser(self):
+        response = "FE FE E0 A4 03 00 00 50 45 01 FD"
+        frame = response_frame(response, 0x03, 5)
+        self.assertEqual(bcd_le(frame[5:10]), 145_500_000)
+
+    def test_smoke_response_parser_rejects_wrong_command(self):
+        with self.assertRaises(BridgeError):
+            response_frame("FE FE E0 A4 04 01 02 FD", 0x03, 5)
 
 
 if __name__ == "__main__":

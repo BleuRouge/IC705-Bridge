@@ -133,19 +133,18 @@ Le but est de permettre à Python d’utiliser IC705 Bridge comme remplacement d
 Exemple côté Python :
 
 ```python
-from radioforge import RadioForge
+from ic705bridge import IC705Bridge
 
-rf = RadioForge("http://127.0.0.1:8765")
+rig = IC705Bridge("http://127.0.0.1:8765")
 
-print(rf.status())
+print(rig.status())
 
-response = rf.send_civ("FE FE A4 E0 03 FD")
+response = rig.send_civ("FE FE A4 E0 03 FD")
 
 print("TX:", response["tx"])
 print("RX:", response["response"])
 ```
 
-la lib ne s'appellera pas radioforge.
 La librairie Python reste volontairement bas niveau.
 
 Elle fournit seulement :
@@ -153,7 +152,7 @@ Elle fournit seulement :
 ```txt
 status()
 send_civ(frame_hex)
-stream_civ() plus tard
+stream_civ()
 ```
 
 L’étudiant construit lui-même les trames demandées dans le TP.
@@ -176,13 +175,13 @@ L’étudiant réutilise les mêmes trames, mais cette fois dans un script Pytho
 Exemple :
 
 ```python
-from radioforge import RadioForge
+from ic705bridge import IC705Bridge
 
-rf = RadioForge()
+rig = IC705Bridge()
 
-rf.send_civ("FE FE A4 E0 03 FD")
-rf.send_civ("FE FE A4 E0 05 00 00 05 45 01 FD")
-rf.send_civ("FE FE A4 E0 06 07 FD")
+rig.send_civ("FE FE A4 E0 03 FD")
+rig.send_civ("FE FE A4 E0 05 00 00 05 45 01 FD")
+rig.send_civ("FE FE A4 E0 06 07 FD")
 ```
 
 L’app sert alors de passerelle :

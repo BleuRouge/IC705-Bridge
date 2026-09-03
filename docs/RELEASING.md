@@ -6,7 +6,7 @@ les publie automatiquement. L'app installée vérifie ensuite les mises à jour 
 démarrage et se met à jour toute seule.
 
 ```
-git tag v0.1.1  →  GitHub Actions  →  Release avec les 3 installeurs + latest.json
+git tag v0.1.2  →  GitHub Actions  →  Release avec les 3 installeurs + latest.json
                                           │
                           app installée ──┘ (vérifie au lancement, télécharge, redémarre)
 ```
@@ -48,17 +48,24 @@ gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD --body ""
    - `src-tauri/tauri.conf.json` → `"version"`
    - `package.json` → `"version"`
    - `src-tauri/Cargo.toml` → `version`
-2. Commit sur `main` :
+2. **Valide cette version** avec l'application fermée, puis avec la radio
+   connectée :
    ```bash
-   git commit -am "Release v0.1.1"
+   python3 scripts/verify_demo.py
+   # lancer le nouveau build d'IC705 Bridge et se connecter à la radio
+   python3 scripts/verify_demo.py --live --scope
+   ```
+3. Commit sur `main` :
+   ```bash
+   git commit -am "Release v0.1.2"
    git push origin main
    ```
-3. Crée et pousse le tag (préfixe `v`) :
+4. Crée et pousse le tag (préfixe `v`) :
    ```bash
-   git tag v0.1.1
-   git push origin v0.1.1
+   git tag v0.1.2
+   git push origin v0.1.2
    ```
-4. Le workflow [`.github/workflows/release.yml`](../.github/workflows/release.yml)
+5. Le workflow [`.github/workflows/release.yml`](../.github/workflows/release.yml)
    construit et publie la Release. Compter ~15-25 min (3 OS en parallèle).
 
 La Release contient :
@@ -113,7 +120,7 @@ DMG seul : il n'est pas une cible « updater », donc aucune clé n'est requise.
 
 ```bash
 pnpm tauri build --bundles dmg
-open "src-tauri/target/release/bundle/dmg/IC705 Bridge_0.1.0_aarch64.dmg"
+open "src-tauri/target/release/bundle/dmg/IC705 Bridge_<version>_aarch64.dmg"
 ```
 
 ### Build de production complet (avec artefact + signature updater)
