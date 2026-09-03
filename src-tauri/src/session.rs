@@ -6,10 +6,10 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
-use tokio::sync::{broadcast, watch};
+use tokio::sync::{broadcast, watch, Mutex};
 use tokio::task::JoinHandle;
 
-use crate::error::Result;
+use crate::error::{BridgeError, Result};
 use crate::rsba1::control::{connect_control, ControlStream};
 use crate::rsba1::serial::{connect_serial, SerialStream};
 use crate::rsba1::stream::{StreamCommon, TaskGuard};
@@ -57,6 +57,10 @@ pub struct Session {
     control: Arc<ControlStream>,
     serial: Arc<SerialStream>,
     civ_tx: broadcast::Sender<Vec<u8>>,
+    /// Une seule transaction requête/réponse CI-V à la fois. Le flux RX reste
+    /// diffusé en parallèle vers le terminal et `/stream`, mais deux clients
+    /// HTTP/Tauri ne peuvent plus s'attribuer la même réponse radio.
+    civ_request: Mutex<()>,
     /// Passe à `true` quand le watchdog déclare le lien radio perdu. Le canal
     /// se ferme (sans `true`) si la session est détruite proprement.
     link_lost_rx: watch::Receiver<bool>,
@@ -126,6 +130,7 @@ impl Session {
             control: connection.control,
             serial,
             civ_tx,
+            civ_request: Mutex::new(()),
             link_lost_rx,
             handles: guard.disarm(),
         })
@@ -133,8 +138,11 @@ impl Session {
 
     /// Envoie une trame CI-V brute et collecte la (ou les) réponse(s) reçues
     /// dans une courte fenêtre. La radio renvoie d'abord l'écho de notre trame
-    /// (spec §8) : il est écarté. Renvoie les octets de réponse concaténés.
+    /// (spec §8) : il est écarté. Les trames spontanées sans rapport avec la
+    /// commande sont également ignorées. Renvoie les réponses corrélées
+    /// concaténées et une erreur explicite si aucune n'arrive à temps.
     pub async fn send_civ(&self, frame: &[u8]) -> Result<Vec<u8>> {
+        let _request = self.civ_request.lock().await;
         let mut rx = self.civ_tx.subscribe();
         self.serial.send_civ(frame).await?;
 
@@ -146,15 +154,27 @@ impl Session {
         while let Some(remaining) = first_deadline.checked_duration_since(Instant::now()) {
             match tokio::time::timeout(remaining, rx.recv()).await {
                 Ok(Ok(received)) => {
-                    if received == frame {
-                        continue; // écho de notre propre trame
+                    if !is_response_to(frame, &received) {
+                        continue;
                     }
                     response.extend_from_slice(&received);
                     break;
                 }
                 Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
-                _ => return Ok(response), // timeout / fermé : pas de réponse
+                _ => {
+                    return Err(BridgeError::Timeout(format!(
+                        "réponse CI-V à {}",
+                        to_hex(frame)
+                    )))
+                }
             }
+        }
+
+        if response.is_empty() {
+            return Err(BridgeError::Timeout(format!(
+                "réponse CI-V à {}",
+                to_hex(frame)
+            )));
         }
 
         // Collecte des trames suivantes tant qu'elles arrivent rapidement,
@@ -165,7 +185,7 @@ impl Session {
             }
             match tokio::time::timeout(RESP_IDLE_GAP, rx.recv()).await {
                 Ok(Ok(received)) => {
-                    if received != frame {
+                    if is_response_to(frame, &received) {
                         response.extend_from_slice(&received);
                     }
                 }
@@ -191,8 +211,8 @@ impl Session {
 
     /// Déconnexion propre : ferme le canal serial, envoie les déconnexions et
     /// arrête toutes les tâches de fond. Prend `&self` (la session vit dans un
-    /// `Arc` partagé) ; un `send_civ` encore en vol se termine sur une réponse
-    /// vide, sans panique.
+    /// `Arc` partagé) ; un `send_civ` encore en vol se termine par une erreur
+    /// bornée, sans panique.
     pub async fn disconnect(&self) {
         let _ = self.serial.send_open_close(true).await;
         let _ = self.serial.common.send_disconnect().await;
@@ -203,6 +223,49 @@ impl Session {
             h.abort();
         }
     }
+}
+
+/// Vérifie qu'une trame reçue peut être la réponse à `request`.
+///
+/// Pour une trame CI-V standard, les adresses source/destination doivent être
+/// inversées et le code commande identique. Les acquittements `FB`/`FA` sont
+/// valables pour toute commande d'écriture. Les saisies non standard gardent
+/// un comportement bas niveau : la première trame différente de l'écho est
+/// acceptée.
+fn is_response_to(request: &[u8], received: &[u8]) -> bool {
+    if received == request {
+        return false;
+    }
+
+    let standard_request =
+        request.len() >= 6 && request.starts_with(&[0xFE, 0xFE]) && request.last() == Some(&0xFD);
+    let standard_response = received.len() >= 6
+        && received.starts_with(&[0xFE, 0xFE])
+        && received.last() == Some(&0xFD);
+
+    if !standard_request || !standard_response {
+        return true;
+    }
+
+    let addressed_to_requester = received[2] == request[3] && received[3] == request[2];
+    let command_matches = if matches!(received[4], 0xFA | 0xFB) {
+        true
+    } else if received[4] != request[4] {
+        false
+    } else if command_has_subcommand(request[4]) && request.len() >= 7 && received.len() >= 7 {
+        received[5] == request[5]
+    } else {
+        true
+    };
+    addressed_to_requester && command_matches
+}
+
+/// Familles CI-V dont le premier octet de données identifie une sous-commande.
+fn command_has_subcommand(command: u8) -> bool {
+    matches!(
+        command,
+        0x14 | 0x15 | 0x16 | 0x1A | 0x1B | 0x1C | 0x21 | 0x25 | 0x26 | 0x27
+    )
 }
 
 impl Drop for Session {
@@ -241,12 +304,35 @@ mod tests {
     use tokio::net::UdpSocket;
 
     const RADIO_SID: u32 = 0xDEAD_BEEF;
-    const CIV_RESPONSE: [u8; 11] = [0xFE, 0xFE, 0xE0, 0xA4, 0x03, 0x00, 0x00, 0x05, 0x45, 0x01, 0xFD];
+    const CIV_RESPONSE: [u8; 11] = [
+        0xFE, 0xFE, 0xE0, 0xA4, 0x03, 0x00, 0x00, 0x05, 0x45, 0x01, 0xFD,
+    ];
+    const UNSOLICITED_MODE: [u8; 8] = [0xFE, 0xFE, 0xE0, 0xA4, 0x04, 0x01, 0x02, 0xFD];
 
     /// Sérialise les tests qui réservent les ports UDP 50001/50002 (sinon ils se
     /// disputeraient le bind en parallèle). Mutex tokio : sûr à tenir au travers
     /// des `.await` du test.
     static PORT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    #[test]
+    fn correlates_civ_responses_and_rejects_echo_or_unsolicited_frames() {
+        let request = [0xFE, 0xFE, 0xA4, 0xE0, 0x03, 0xFD];
+        let response = [
+            0xFE, 0xFE, 0xE0, 0xA4, 0x03, 0x00, 0x00, 0x05, 0x45, 0x01, 0xFD,
+        ];
+        let unsolicited_mode = [0xFE, 0xFE, 0xE0, 0xA4, 0x04, 0x01, 0x02, 0xFD];
+        let wrong_radio = [0xFE, 0xFE, 0xE0, 0xA5, 0x03, 0xFD];
+        let ack = [0xFE, 0xFE, 0xE0, 0xA4, 0xFB, 0xFD];
+        let smeter_request = [0xFE, 0xFE, 0xA4, 0xE0, 0x15, 0x02, 0xFD];
+        let other_meter = [0xFE, 0xFE, 0xE0, 0xA4, 0x15, 0x11, 0x00, 0x00, 0xFD];
+
+        assert!(!is_response_to(&request, &request));
+        assert!(is_response_to(&request, &response));
+        assert!(!is_response_to(&request, &unsolicited_mode));
+        assert!(!is_response_to(&request, &wrong_radio));
+        assert!(is_response_to(&request, &ack));
+        assert!(!is_response_to(&smeter_request, &other_meter));
+    }
 
     /// Arrête une radio simulée et ATTEND sa fin réelle : son socket doit être
     /// libéré avant de relâcher [`PORT_LOCK`], sinon le test suivant peut
@@ -281,7 +367,9 @@ mod tests {
     async fn mock_control(socket: UdpSocket) {
         let mut buf = [0u8; 2048];
         loop {
-            let Ok((n, peer)) = socket.recv_from(&mut buf).await else { return };
+            let Ok((n, peer)) = socket.recv_from(&mut buf).await else {
+                return;
+            };
             let r = &buf[..n];
             if r.len() < 16 {
                 continue;
@@ -333,7 +421,9 @@ mod tests {
     async fn mock_serial(socket: UdpSocket) {
         let mut buf = [0u8; 2048];
         loop {
-            let Ok((n, peer)) = socket.recv_from(&mut buf).await else { return };
+            let Ok((n, peer)) = socket.recv_from(&mut buf).await else {
+                return;
+            };
             let r = &buf[..n];
             if r.len() < 16 {
                 continue;
@@ -352,7 +442,14 @@ mod tests {
                 if 21 + l <= r.len() {
                     let civ = r[21..21 + l].to_vec();
                     let _ = socket.send_to(&data_packet(&civ, client_sid), peer).await;
-                    let _ = socket.send_to(&data_packet(&CIV_RESPONSE, client_sid), peer).await;
+                    // Une notification sans rapport ne doit pas être attribuée
+                    // à la transaction en cours.
+                    let _ = socket
+                        .send_to(&data_packet(&UNSOLICITED_MODE, client_sid), peer)
+                        .await;
+                    let _ = socket
+                        .send_to(&data_packet(&CIV_RESPONSE, client_sid), peer)
+                        .await;
                 }
             }
         }
@@ -402,7 +499,10 @@ mod tests {
             .await
             .expect("connexion à la radio simulée");
         let mut link = session.link_lost_watch();
-        assert!(!*link.borrow(), "le lien doit être vivant après la connexion");
+        assert!(
+            !*link.borrow(),
+            "le lien doit être vivant après la connexion"
+        );
 
         // La radio « meurt » : plus aucune réponse (attendre la fin réelle des
         // mocks pour que leurs sockets soient bien fermés).
@@ -434,7 +534,9 @@ mod tests {
         let server = tokio::spawn(async move {
             let mut buf = [0u8; 2048];
             loop {
-                let Ok((n, peer)) = control.recv_from(&mut buf).await else { return };
+                let Ok((n, peer)) = control.recv_from(&mut buf).await else {
+                    return;
+                };
                 let r = &buf[..n];
                 if r.len() < 16 {
                     continue;

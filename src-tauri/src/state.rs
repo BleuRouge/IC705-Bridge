@@ -44,9 +44,9 @@ impl StatusInfo {
 
 /// État global de l'application.
 ///
-/// La session est un `Arc` : les émetteurs (`send_civ` du terminal et de l'API)
-/// clonent l'Arc puis RELÂCHENT le verrou avant d'attendre la réponse radio
-/// (~1,5 s max). Sans cela, terminal et scripts Python se sérialisaient.
+/// La session est un `Arc` : les émetteurs clonent l'Arc puis RELÂCHENT ce
+/// verrou global avant d'attendre la réponse radio. La sérialisation nécessaire
+/// des transactions CI-V est gérée plus finement à l'intérieur de `Session`.
 pub struct AppState {
     pub session: Mutex<Option<Arc<Session>>>,
     /// Garrot anti-connexions concurrentes (voir `commands::connect`).

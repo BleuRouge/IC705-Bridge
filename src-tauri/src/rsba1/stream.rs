@@ -117,12 +117,12 @@ impl StreamCommon {
         let remote: SocketAddr = tokio::net::lookup_host((host, port))
             .await
             .map_err(|_| {
-                BridgeError::Protocol(format!("hôte introuvable : « {host} » (vérifier l'IP ou le nom)"))
+                BridgeError::Protocol(format!(
+                    "hôte introuvable : « {host} » (vérifier l'IP ou le nom)"
+                ))
             })?
             .next()
-            .ok_or_else(|| {
-                BridgeError::Protocol(format!("hôte introuvable : « {host} »"))
-            })?;
+            .ok_or_else(|| BridgeError::Protocol(format!("hôte introuvable : « {host} »")))?;
 
         // kappanhang lie le port local au même numéro que le stream. On essaie,
         // puis on retombe sur un port éphémère si déjà utilisé (reconnexion).
@@ -184,8 +184,14 @@ impl StreamCommon {
             0x00,
             seq as u8,
             (seq >> 8) as u8,
-            ls[0], ls[1], ls[2], ls[3],
-            rs[0], rs[1], rs[2], rs[3],
+            ls[0],
+            ls[1],
+            ls[2],
+            ls[3],
+            rs[0],
+            rs[1],
+            rs[2],
+            rs[3],
         ]
     }
 
@@ -248,7 +254,11 @@ impl StreamCommon {
 
     async fn wait_pkt4(&self) -> Result<()> {
         let r = self
-            .recv_matching(EXPECT_TIMEOUT, 16, &[0x10, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00])
+            .recv_matching(
+                EXPECT_TIMEOUT,
+                16,
+                &[0x10, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00],
+            )
             .await
             .ok_or_else(|| {
                 BridgeError::Timeout(format!(
@@ -270,22 +280,36 @@ impl StreamCommon {
     }
 
     async fn wait_pkt6_answer(&self) -> Result<()> {
-        self.recv_matching(EXPECT_TIMEOUT, 16, &[0x10, 0x00, 0x00, 0x00, 0x06, 0x00, 0x01, 0x00])
-            .await
-            .ok_or_else(|| BridgeError::Timeout(format!("{}/pkt6 answer", self.name)))?;
+        self.recv_matching(
+            EXPECT_TIMEOUT,
+            16,
+            &[0x10, 0x00, 0x00, 0x00, 0x06, 0x00, 0x01, 0x00],
+        )
+        .await
+        .ok_or_else(|| BridgeError::Timeout(format!("{}/pkt6 answer", self.name)))?;
         Ok(())
     }
 
     /// Attend (en lecture directe sur le socket) un paquet précis. À n'utiliser
     /// qu'AVANT le démarrage du reader (sinon les paquets sont consommés ailleurs).
-    pub async fn expect(&self, timeout: Duration, min_len: usize, prefix: &[u8]) -> Option<Vec<u8>> {
+    pub async fn expect(
+        &self,
+        timeout: Duration,
+        min_len: usize,
+        prefix: &[u8],
+    ) -> Option<Vec<u8>> {
         self.recv_matching(timeout, min_len, prefix).await
     }
 
     /// Reçoit en boucle jusqu'à trouver un paquet d'au moins `min_len` octets
     /// commençant par `prefix`, ou `None` après `timeout`. À n'utiliser qu'avant
     /// le démarrage du reader.
-    async fn recv_matching(&self, timeout: Duration, min_len: usize, prefix: &[u8]) -> Option<Vec<u8>> {
+    async fn recv_matching(
+        &self,
+        timeout: Duration,
+        min_len: usize,
+        prefix: &[u8],
+    ) -> Option<Vec<u8>> {
         let deadline = Instant::now() + timeout;
         let mut buf = [0u8; 1500];
         loop {
@@ -293,7 +317,8 @@ impl StreamCommon {
             match tokio::time::timeout(remaining, self.socket.recv(&mut buf)).await {
                 Ok(Ok(n)) => {
                     let r = &buf[..n];
-                    if r.len() >= min_len && r.len() >= prefix.len() && &r[..prefix.len()] == prefix {
+                    if r.len() >= min_len && r.len() >= prefix.len() && &r[..prefix.len()] == prefix
+                    {
                         return Some(r.to_vec());
                     }
                     // Sinon : paquet non attendu (ping, etc.) -> on continue.
@@ -329,7 +354,10 @@ impl StreamCommon {
                 let mut st = self.pkt7.lock().await;
                 let inner = st.inner_seq;
                 st.inner_seq = st.inner_seq.wrapping_add(1);
-                (0x00u8, [rand::random::<u8>(), inner as u8, (inner >> 8) as u8, 0x06])
+                (
+                    0x00u8,
+                    [rand::random::<u8>(), inner as u8, (inner >> 8) as u8, 0x06],
+                )
             }
         };
         let mut d = self.header(21, 0x07, seq).to_vec();
@@ -389,7 +417,10 @@ impl StreamCommon {
     async fn retransmit_one(&self, seq: u16) -> Result<()> {
         let found = {
             let st = self.pkt0.lock().await;
-            st.tx_buf.iter().find(|(s, _)| *s == seq).map(|(_, d)| d.clone())
+            st.tx_buf
+                .iter()
+                .find(|(s, _)| *s == seq)
+                .map(|(_, d)| d.clone())
         };
         match found {
             Some(d) => {
@@ -468,7 +499,10 @@ fn compute_local_sid(addr: SocketAddr) -> u32 {
 
 /// Démarre la boucle de lecture : gère pkt7 et les retransmissions en interne,
 /// déduplique les paquets type 0x00 et transmet le reste (idle + data) sur `data_tx`.
-pub fn spawn_reader(common: Arc<StreamCommon>, data_tx: mpsc::UnboundedSender<Vec<u8>>) -> JoinHandle<()> {
+pub fn spawn_reader(
+    common: Arc<StreamCommon>,
+    data_tx: mpsc::UnboundedSender<Vec<u8>>,
+) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut buf = [0u8; 1500];
         loop {
@@ -560,9 +594,16 @@ pub fn spawn_pkt0_idle(common: Arc<StreamCommon>) -> JoinHandle<()> {
         loop {
             let (last_send, active) = {
                 let st = common.pkt0.lock().await;
-                (st.last_send_at, st.last_tracked_at.elapsed() < PKT0_IDLE_AFTER)
+                (
+                    st.last_send_at,
+                    st.last_tracked_at.elapsed() < PKT0_IDLE_AFTER,
+                )
             };
-            let interval = if active { PKT0_ACTIVE_INTERVAL } else { PKT0_IDLE_INTERVAL };
+            let interval = if active {
+                PKT0_ACTIVE_INTERVAL
+            } else {
+                PKT0_IDLE_INTERVAL
+            };
             let due = last_send + interval;
             let now = Instant::now();
             if now >= due {
@@ -581,7 +622,10 @@ mod tests {
     use super::*;
 
     fn fresh() -> RxState {
-        RxState { last_seq: None, missing: HashMap::new() }
+        RxState {
+            last_seq: None,
+            missing: HashMap::new(),
+        }
     }
 
     #[test]
@@ -636,7 +680,10 @@ mod tests {
         })]);
         drop(guard); // doit abandonner la tâche avant qu'elle ne s'exécute
         tokio::time::sleep(Duration::from_millis(120)).await;
-        assert!(!ran.load(Ordering::SeqCst), "la tâche aurait dû être abandonnée");
+        assert!(
+            !ran.load(Ordering::SeqCst),
+            "la tâche aurait dû être abandonnée"
+        );
     }
 
     #[tokio::test]
@@ -650,6 +697,9 @@ mod tests {
         for h in guard.disarm() {
             let _ = h.await; // désarmée : la tâche survit et termine
         }
-        assert!(ran.load(Ordering::SeqCst), "la tâche désarmée aurait dû s'exécuter");
+        assert!(
+            ran.load(Ordering::SeqCst),
+            "la tâche désarmée aurait dû s'exécuter"
+        );
     }
 }

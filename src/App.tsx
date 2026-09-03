@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { LogicalSize } from "@tauri-apps/api/dpi";
 import { listen } from "@tauri-apps/api/event";
+import { currentMonitor, getCurrentWindow } from "@tauri-apps/api/window";
 import type { Update } from "@tauri-apps/plugin-updater";
 import type { CivResult, ConnState, LogEntry, StatusSnapshot } from "./types";
 import { checkForUpdate, installUpdate, type UpdateProgress } from "./updater";
@@ -27,6 +29,11 @@ let logSeq = 0;
 const MAX_LOG = 2000;
 /** Fenêtre de regroupement des trames avant rendu (~10 Hz). */
 const LOG_FLUSH_MS = 100;
+
+/** Taille nominale, réduite automatiquement si l'écran de travail est plus petit. */
+const WINDOW_WIDTH = 980;
+const WINDOW_HEIGHT = 720;
+const WINDOW_MARGIN = 32;
 
 /** Clés localStorage (on ne mémorise jamais le mot de passe). */
 const LS_HOST = "ic705.host";
@@ -67,6 +74,27 @@ function App() {
   const [updateProgress, setUpdateProgress] = useState<UpdateProgress | null>(null);
 
   const connected = status.state === "civ_ready";
+
+  // Le gestionnaire de fenêtres ne contraint pas toujours la taille initiale
+  // aux petits écrans (vidéoprojecteur, mise à l'échelle Windows, dock macOS).
+  // Ajuste une fois la fenêtre à la zone réellement disponible.
+  useEffect(() => {
+    async function fitWindowToScreen() {
+      try {
+        const monitor = await currentMonitor();
+        if (!monitor) return;
+        const availableWidth = monitor.workArea.size.width / monitor.scaleFactor - WINDOW_MARGIN;
+        const availableHeight = monitor.workArea.size.height / monitor.scaleFactor - WINDOW_MARGIN;
+        await getCurrentWindow().setSize(new LogicalSize(
+          Math.min(WINDOW_WIDTH, availableWidth),
+          Math.min(WINDOW_HEIGHT, availableHeight),
+        ));
+      } catch {
+        // En aperçu web (hors Tauri) ces API ne sont pas disponibles.
+      }
+    }
+    void fitWindowToScreen();
+  }, []);
 
   // Bufferise les lignes et ne les pousse dans l'état que par lots : sous flux
   // continu (scope / transceive), un setLog + scroll par trame gelait l'UI.
@@ -169,11 +197,10 @@ function App() {
     setSending(true);
     addLog("tx", f);
     try {
-      // Les trames RX s'affichent en temps réel via l'événement `civ-rx` : on
-      // ne se sert de la réponse agrégée que pour signaler une absence de
-      // réponse (sinon double affichage des trames reçues).
-      const res = await invoke<CivResult>("send_civ", { frame: f });
-      if (!res.response) addLog("info", "(pas de réponse)");
+      // Les trames RX s'affichent en temps réel via l'événement `civ-rx`.
+      // Le backend lève une erreur explicite si aucune réponse corrélée
+      // n'arrive, ce qui évite un double affichage ici.
+      await invoke<CivResult>("send_civ", { frame: f });
     } catch (err) {
       addLog("error", String(err));
     } finally {
@@ -185,7 +212,6 @@ function App() {
     <div className="app">
       <header className="topbar">
         <div className="brand">
-          <span className="logo">📻</span>
           <div>
             <div className="title">IC705 Bridge</div>
             <div className="subtitle">Passerelle CI-V · Icom IC-705</div>

@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use tokio_stream::{wrappers::BroadcastStream, StreamExt};
 
 use crate::commands::CivResult;
+use crate::error::BridgeError;
 use crate::state::{AppState, StatusSnapshot, API_ADDR};
 use crate::util::{parse_hex, to_hex};
 
@@ -37,6 +38,18 @@ struct ApiError {
 
 fn err(code: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<ApiError>) {
     (code, Json(ApiError { error: msg.into() }))
+}
+
+fn bridge_err(e: BridgeError) -> (StatusCode, Json<ApiError>) {
+    let code = match &e {
+        BridgeError::InvalidFrame(_) | BridgeError::Protocol(_) => StatusCode::BAD_REQUEST,
+        BridgeError::NotConnected => StatusCode::SERVICE_UNAVAILABLE,
+        BridgeError::Timeout(_) => StatusCode::GATEWAY_TIMEOUT,
+        BridgeError::Io(_) | BridgeError::InvalidCredentials | BridgeError::AuthFailed(_) => {
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    };
+    err(code, e.to_string())
 }
 
 /// Hôtes acceptés dans l'en-tête `Host` (doivent correspondre à [`API_ADDR`]).
@@ -92,8 +105,8 @@ async fn civ_handler(
 ) -> Result<Json<CivResult>, (StatusCode, Json<ApiError>)> {
     let bytes = parse_hex(&req.frame).map_err(|e| err(StatusCode::BAD_REQUEST, e.to_string()))?;
 
-    // Clone de l'Arc puis relâchement du verrou : l'attente de réponse (jusqu'à
-    // ~1,5 s) ne doit pas sérialiser les clients (terminal + scripts Python).
+    // Clone de l'Arc puis relâchement du verrou global : `Session` prend ensuite
+    // en charge la sérialisation des transactions CI-V concurrentes.
     let session = st
         .session
         .lock()
@@ -102,10 +115,7 @@ async fn civ_handler(
         .cloned()
         .ok_or_else(|| err(StatusCode::SERVICE_UNAVAILABLE, "non connecté à l'IC-705"))?;
 
-    let response = session
-        .send_civ(&bytes)
-        .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let response = session.send_civ(&bytes).await.map_err(bridge_err)?;
 
     Ok(Json(CivResult {
         tx: to_hex(&bytes),
@@ -123,17 +133,24 @@ async fn stream_handler(State(st): State<Arc<AppState>>) -> Response {
         let guard = st.session.lock().await;
         match guard.as_ref() {
             Some(session) => session.subscribe(),
-            None => return err(StatusCode::SERVICE_UNAVAILABLE, "non connecté à l'IC-705").into_response(),
+            None => {
+                return err(StatusCode::SERVICE_UNAVAILABLE, "non connecté à l'IC-705")
+                    .into_response()
+            }
         }
     };
 
     let stream = BroadcastStream::new(rx).filter_map(|res| match res {
-        Ok(frame) => Some(Ok::<Event, Infallible>(Event::default().data(to_hex(&frame)))),
+        Ok(frame) => Some(Ok::<Event, Infallible>(
+            Event::default().data(to_hex(&frame)),
+        )),
         // `Lagged` : le client n'a pas suivi le débit, on saute simplement.
         Err(_) => None,
     });
 
-    Sse::new(stream).keep_alive(KeepAlive::default()).into_response()
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
 }
 
 /// Construit le routeur de l'API locale (garde locale incluse).
@@ -236,5 +253,11 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         assert_eq!(status_of(req).await, StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn civ_timeout_maps_to_gateway_timeout() {
+        let (status, _) = bridge_err(BridgeError::Timeout("réponse CI-V".into()));
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
     }
 }

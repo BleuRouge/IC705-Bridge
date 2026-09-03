@@ -41,7 +41,9 @@ pub async fn connect(
     // créeraient deux sessions dont une serait écrasée SANS deauth (radio
     // « occupée »). L'UI désactive le bouton, mais pas un invoke direct.
     let Ok(_connecting) = state.connecting.try_lock() else {
-        return Err(BridgeError::Protocol("une connexion est déjà en cours".into()));
+        return Err(BridgeError::Protocol(
+            "une connexion est déjà en cours".into(),
+        ));
     };
 
     // Une seule session à la fois : on ferme la précédente.
@@ -49,7 +51,12 @@ pub async fn connect(
         old.disconnect().await;
     }
 
-    state.set_status(Some(&app), ConnState::Connecting, format!("Connexion à {host}…"), Some(host.clone()));
+    state.set_status(
+        Some(&app),
+        ConnState::Connecting,
+        format!("Connexion à {host}…"),
+        Some(host.clone()),
+    );
 
     match Session::connect(&host, &username, &password, Some(app.clone())).await {
         Ok(session) => {
@@ -116,8 +123,9 @@ pub async fn send_civ(state: State<'_, Arc<AppState>>, frame: String) -> Result<
     let state = state.inner().clone();
     let bytes = parse_hex(&frame)?;
 
-    // Clone de l'Arc puis relâchement du verrou : l'attente de réponse (jusqu'à
-    // ~1,5 s) ne doit pas bloquer les autres émetteurs (API Python, terminal).
+    // Clone de l'Arc puis relâchement du verrou global : une déconnexion ou une
+    // lecture d'état ne doit pas attendre la réponse radio. `Session` sérialise
+    // elle-même les transactions CI-V concurrentes.
     let session = state
         .session
         .lock()

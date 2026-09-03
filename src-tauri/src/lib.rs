@@ -25,8 +25,9 @@ const SHUTDOWN_DISCONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 pub fn run() {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("ic705_bridge_lib=info,warn")),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                tracing_subscriber::EnvFilter::new("ic705_bridge_lib=info,warn")
+            }),
         )
         .init();
 
@@ -115,7 +116,12 @@ fn begin_shutdown(app_handle: &tauri::AppHandle) -> bool {
     }
     // Pas de session active ? Rien à nettoyer : on rend le flag (une session
     // pourrait encore être créée si cette sortie est ensuite annulée).
-    if state.session.try_lock().map(|g| g.is_none()).unwrap_or(false) {
+    if state
+        .session
+        .try_lock()
+        .map(|g| g.is_none())
+        .unwrap_or(false)
+    {
         state.shutdown_started.store(false, Ordering::SeqCst);
         return false;
     }

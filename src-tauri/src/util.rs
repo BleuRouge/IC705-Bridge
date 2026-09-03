@@ -9,7 +9,10 @@ const MAX_FRAME_BYTES: usize = 1024;
 
 /// Formate des octets en hex majuscule séparé par des espaces : `FE FE A4 E0 03 FD`.
 pub fn to_hex(d: &[u8]) -> String {
-    d.iter().map(|b| format!("{b:02X}")).collect::<Vec<_>>().join(" ")
+    d.iter()
+        .map(|b| format!("{b:02X}"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Parse une saisie hexadécimale tolérante (espaces, virgules, `0x`, casse libre)
@@ -33,7 +36,9 @@ pub fn parse_hex(input: &str) -> Result<Vec<u8>> {
         )));
     }
     if let Some(bad) = cleaned.chars().find(|c| !c.is_ascii_hexdigit()) {
-        return Err(BridgeError::InvalidFrame(format!("caractère invalide : '{bad}'")));
+        return Err(BridgeError::InvalidFrame(format!(
+            "caractère invalide : '{bad}'"
+        )));
     }
     if cleaned.len() / 2 > MAX_FRAME_BYTES {
         return Err(BridgeError::InvalidFrame(format!(
@@ -55,12 +60,18 @@ mod tests {
 
     #[test]
     fn parses_spaced_frame() {
-        assert_eq!(parse_hex("FE FE A4 E0 03 FD").unwrap(), vec![0xFE, 0xFE, 0xA4, 0xE0, 0x03, 0xFD]);
+        assert_eq!(
+            parse_hex("FE FE A4 E0 03 FD").unwrap(),
+            vec![0xFE, 0xFE, 0xA4, 0xE0, 0x03, 0xFD]
+        );
     }
 
     #[test]
     fn parses_compact_and_mixed_case() {
-        assert_eq!(parse_hex("fefea4e003fd").unwrap(), vec![0xFE, 0xFE, 0xA4, 0xE0, 0x03, 0xFD]);
+        assert_eq!(
+            parse_hex("fefea4e003fd").unwrap(),
+            vec![0xFE, 0xFE, 0xA4, 0xE0, 0x03, 0xFD]
+        );
     }
 
     #[test]
@@ -72,7 +83,10 @@ mod tests {
 
     #[test]
     fn roundtrip() {
-        assert_eq!(to_hex(&[0xFE, 0xFE, 0xA4, 0xE0, 0x03, 0xFD]), "FE FE A4 E0 03 FD");
+        assert_eq!(
+            to_hex(&[0xFE, 0xFE, 0xA4, 0xE0, 0x03, 0xFD]),
+            "FE FE A4 E0 03 FD"
+        );
     }
 
     #[test]

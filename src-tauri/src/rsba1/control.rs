@@ -55,8 +55,22 @@ impl ControlStream {
         let mut p = self.common.header(128, 0x00, 0).to_vec();
         // offset 16..32
         p.extend_from_slice(&[
-            0x00, 0x00, 0x00, 0x70, 0x01, 0x00, 0x00, seq as u8, (seq >> 8) as u8, 0x00,
-            start_id[0], start_id[1], 0x00, 0x00, 0x00, 0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x70,
+            0x01,
+            0x00,
+            0x00,
+            seq as u8,
+            (seq >> 8) as u8,
+            0x00,
+            start_id[0],
+            start_id[1],
+            0x00,
+            0x00,
+            0x00,
+            0x00,
         ]);
         p.extend_from_slice(&[0u8; 32]); // offset 32..64
         p.extend_from_slice(&user); // 64..80
@@ -73,8 +87,22 @@ impl ControlStream {
         let id = *self.auth_id.lock().unwrap();
         let mut p = self.common.header(64, 0x00, 0).to_vec();
         p.extend_from_slice(&[
-            0x00, 0x00, 0x00, 0x30, 0x01, magic, 0x00, seq as u8, (seq >> 8) as u8, 0x00,
-            id[0], id[1], id[2], id[3], id[4], id[5],
+            0x00,
+            0x00,
+            0x00,
+            0x30,
+            0x01,
+            magic,
+            0x00,
+            seq as u8,
+            (seq >> 8) as u8,
+            0x00,
+            id[0],
+            id[1],
+            id[2],
+            id[3],
+            id[4],
+            id[5],
         ]); // 16..32
         p.extend_from_slice(&[0u8; 32]); // 32..64
         debug_assert_eq!(p.len(), 64);
@@ -88,8 +116,22 @@ impl ControlStream {
         let user = passcode(&self.username);
         let mut p = self.common.header(144, 0x00, 0).to_vec();
         p.extend_from_slice(&[
-            0x00, 0x00, 0x00, 0x80, 0x01, 0x03, 0x00, seq as u8, (seq >> 8) as u8, 0x00,
-            id[0], id[1], id[2], id[3], id[4], id[5],
+            0x00,
+            0x00,
+            0x00,
+            0x80,
+            0x01,
+            0x03,
+            0x00,
+            seq as u8,
+            (seq >> 8) as u8,
+            0x00,
+            id[0],
+            id[1],
+            id[2],
+            id[3],
+            id[4],
+            id[5],
         ]); // 16..32
         p.extend_from_slice(a8); // 32..48
         p.extend_from_slice(&[0u8; 16]); // 48..64
@@ -97,12 +139,38 @@ impl ControlStream {
         p.extend_from_slice(&[0u8; 24]); // 72..96
         p.extend_from_slice(&user); // 96..112
         p.extend_from_slice(&[
-            0x01, 0x01, 0x04, 0x04, 0x00, 0x00, (AUDIO_SAMPLE_RATE >> 8) as u8, AUDIO_SAMPLE_RATE as u8,
-            0x00, 0x00, (AUDIO_SAMPLE_RATE >> 8) as u8, AUDIO_SAMPLE_RATE as u8,
-            0x00, 0x00, (SERIAL_PORT >> 8) as u8, SERIAL_PORT as u8,
-            0x00, 0x00, (AUDIO_PORT >> 8) as u8, AUDIO_PORT as u8,
-            0x00, 0x00, (TX_SEQ_BUF_MS >> 8) as u8, TX_SEQ_BUF_MS as u8,
-            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x01,
+            0x01,
+            0x04,
+            0x04,
+            0x00,
+            0x00,
+            (AUDIO_SAMPLE_RATE >> 8) as u8,
+            AUDIO_SAMPLE_RATE as u8,
+            0x00,
+            0x00,
+            (AUDIO_SAMPLE_RATE >> 8) as u8,
+            AUDIO_SAMPLE_RATE as u8,
+            0x00,
+            0x00,
+            (SERIAL_PORT >> 8) as u8,
+            SERIAL_PORT as u8,
+            0x00,
+            0x00,
+            (AUDIO_PORT >> 8) as u8,
+            AUDIO_PORT as u8,
+            0x00,
+            0x00,
+            (TX_SEQ_BUF_MS >> 8) as u8,
+            TX_SEQ_BUF_MS as u8,
+            0x01,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
         ]); // 112..144
         debug_assert_eq!(p.len(), 144);
         self.common.send_tracked(p).await
@@ -111,7 +179,11 @@ impl ControlStream {
 
 /// Établit le stream de contrôle : handshake, login, auth, puis attend l'ouverture
 /// du serveur serial côté radio. Renvoie une erreur claire si les identifiants sont refusés.
-pub async fn connect_control(host: &str, username: &str, password: &str) -> Result<ControlConnection> {
+pub async fn connect_control(
+    host: &str,
+    username: &str,
+    password: &str,
+) -> Result<ControlConnection> {
     let common = StreamCommon::connect("control", host, CONTROL_PORT).await?;
     common.handshake().await?;
 
@@ -149,7 +221,11 @@ async fn authenticate_control(
     // Réponse 0x60, len >= 96 ; le seq (bytes 6-7) dépend de la radio, on ne le contraint pas.
     ctrl.send_login().await?;
     let r = common
-        .expect(Duration::from_secs(2), 96, &[0x60, 0x00, 0x00, 0x00, 0x00, 0x00])
+        .expect(
+            Duration::from_secs(2),
+            96,
+            &[0x60, 0x00, 0x00, 0x00, 0x00, 0x00],
+        )
         .await
         .ok_or_else(|| BridgeError::Timeout("réponse de login".into()))?;
     if r[48..52] == [0xff, 0xff, 0xff, 0xfe] {
@@ -175,7 +251,10 @@ async fn authenticate_control(
     guard.push(spawn_reauth(ctrl.clone()));
 
     match tokio::time::timeout(READY_TIMEOUT, ready_rx).await {
-        Ok(Ok(Ok(()))) => Ok(ControlConnection { control: ctrl, handles: guard.disarm() }),
+        Ok(Ok(Ok(()))) => Ok(ControlConnection {
+            control: ctrl,
+            handles: guard.disarm(),
+        }),
         Ok(Ok(Err(e))) => Err(e),
         Ok(Err(_)) => Err(BridgeError::Protocol("canal de disponibilité fermé".into())),
         Err(_) => Err(BridgeError::Timeout(
@@ -222,7 +301,8 @@ fn spawn_control_owner(
                     }
                     if r[48..51] == [0x00, 0x00, 0x00] && r[64] == 0x01 {
                         if let Some(tx) = ready_tx.take() {
-                            let _ = tx.send(Err(BridgeError::AuthFailed("radio déconnectée".into())));
+                            let _ =
+                                tx.send(Err(BridgeError::AuthFailed("radio déconnectée".into())));
                         }
                         break;
                     }

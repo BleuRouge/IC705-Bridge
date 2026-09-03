@@ -1,6 +1,6 @@
 [package]
 name = "ic705-bridge"
-version = "0.1.1"
+version = "0.1.2"
 description = "IC705 Bridge — passerelle pédagogique CI-V pour l'Icom IC-705"
 authors = ["BleuRouge_Fab"]
 edition = "2021"
