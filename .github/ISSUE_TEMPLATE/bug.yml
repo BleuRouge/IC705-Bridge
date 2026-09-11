@@ -1,0 +1,25 @@
+name: Signaler un problème
+description: Connexion IC-705, terminal, API locale ou installation.
+title: "[Bug] "
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Version de l'application
+      description: Version affichée dans l'en-tête.
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: Système et architecture
+      placeholder: macOS Apple Silicon, Windows x64, Linux x86_64…
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Étapes et résultat observé
+      description: Indiquer aussi le résultat attendu et le message d'erreur.
+    validations:
+      required: true
