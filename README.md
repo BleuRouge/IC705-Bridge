@@ -24,19 +24,9 @@ que la documentation de ce dépôt ; elles ne servent pas à installer l'applica
 4. Pour Python, relever l'adresse de l'API locale puis suivre le
    **[guide étudiants](docs/ETUDIANTS.md)**.
 
-Aucun paquet Python spécifique n'est nécessaire. Le guide explique uniquement
-la communication HTTP ; la construction et le décodage des trames font partie du TP.
-
 Les installeurs n'ont pas de certificat Apple ou Windows. Si le système bloque
 l'ouverture, vérifier la provenance du fichier puis utiliser **Confidentialité
 et sécurité → Ouvrir quand même** sur macOS ou **Informations complémentaires →
 Exécuter quand même** dans SmartScreen. Sous Linux, rendre l'AppImage exécutable.
-
-L'application propose les mises à jour au démarrage et vérifie leur signature.
-La connexion à la radio reste utilisable sans accès à Internet.
-L'onglet **Crédits** de la V1 présente l'auteur et la licence MIT.
-
-Ce dépôt public contient la documentation étudiants et les fichiers distribués
-dans les Releases. Le développement de l'application est conservé dans un dépôt privé.
 
 [Signaler un problème](https://github.com/BleuRouge/IC705-Bridge/issues) · [Licence MIT](LICENSE)
