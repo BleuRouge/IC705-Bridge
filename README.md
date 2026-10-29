@@ -1,6 +1,6 @@
 # IC705 Bridge
 
-Application de Tao GAUDONEIX pour connecter un Icom IC-705 en Wi-Fi,
+Application permettant de connecter un Icom IC-705 en Wi-Fi,
 échanger des trames CI-V dans un terminal et accéder à une API HTTP locale.
 
 **[Télécharger la dernière version](https://github.com/BleuRouge/IC705-Bridge/releases/latest)**
